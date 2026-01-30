@@ -1,32 +1,22 @@
 package com.musicses.secureproxy.service
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.PendingIntent
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
-import androidx.core.app.NotificationCompat
-import com.musicses.secureproxy.MainActivity
 import com.musicses.secureproxy.model.ProxyConfig
-import com.musicses.secureproxy.network.ConnectionManager
-import com.musicses.secureproxy.proxy.HttpProxyServer
-import com.musicses.secureproxy.proxy.Socks5Server
 import kotlinx.coroutines.*
 
 /**
- * 代理服务 - 作为前台服务运行
+ * 代理服务 - 简化版，仅用于VPN配置管理
+ * 实际的VPN功能由 VpnProxyService 提供
  */
 class ProxyService : Service() {
 
     companion object {
         private const val TAG = "ProxyService"
-        private const val NOTIFICATION_ID = 1001
-        private const val CHANNEL_ID = "proxy_service_channel"
 
         const val ACTION_START = "com.musicses.secureproxy.action.START"
         const val ACTION_STOP = "com.musicses.secureproxy.action.STOP"
@@ -35,10 +25,6 @@ class ProxyService : Service() {
 
     private val binder = ProxyBinder()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
-    private var connectionManager: ConnectionManager? = null
-    private var socks5Server: Socks5Server? = null
-    private var httpProxyServer: HttpProxyServer? = null
 
     @Volatile
     private var running = false
@@ -57,7 +43,6 @@ class ProxyService : Service() {
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "Service created")
-        createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -87,7 +72,7 @@ class ProxyService : Service() {
     }
 
     /**
-     * 启动代理
+     * 启动代理 - 现在只是记录状态，实际VPN由VpnProxyService处理
      */
     private fun startProxy(config: ProxyConfig) {
         if (running) {
@@ -99,34 +84,15 @@ class ProxyService : Service() {
             try {
                 updateStatus(ServiceStatus.STARTING)
 
-                // 创建通知
-                val notification = createNotification("正在启动...")
-                startForeground(NOTIFICATION_ID, notification)
-
-                // 初始化连接管理器
-                connectionManager = ConnectionManager(config, scope).apply {
-                    initialize()
-                }
-
-                // 启动 SOCKS5 服务器
-                socks5Server = Socks5Server(config, connectionManager!!, scope).apply {
-                    start()
-                }
-
-                // 启动 HTTP 代理服务器
-                httpProxyServer = HttpProxyServer(config, connectionManager!!, scope).apply {
-                    start()
-                }
+                Log.i(TAG, "VPN mode - Configuration received")
+                Log.i(TAG, "SNI Host: ${config.sniHost}")
+                Log.i(TAG, "Proxy IP: ${config.proxyIp}")
+                Log.i(TAG, "Server Port: ${config.serverPort}")
 
                 running = true
-
-                val message = "SOCKS5: 127.0.0.1:${config.socksPort}\n" +
-                        "HTTP: 127.0.0.1:${config.httpPort}"
-
-                updateNotification("代理运行中", message)
                 updateStatus(ServiceStatus.RUNNING)
 
-                Log.i(TAG, "Proxy started successfully")
+                Log.i(TAG, "Proxy service ready (VPN mode)")
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start proxy: ${e.message}", e)
@@ -145,84 +111,13 @@ class ProxyService : Service() {
         scope.launch {
             try {
                 updateStatus(ServiceStatus.STOPPING)
-
                 running = false
-
-                socks5Server?.stop()
-                socks5Server = null
-
-                httpProxyServer?.stop()
-                httpProxyServer = null
-
-                connectionManager?.cleanup()
-                connectionManager = null
-
                 updateStatus(ServiceStatus.STOPPED)
-
                 Log.i(TAG, "Proxy stopped")
-
             } catch (e: Exception) {
                 Log.e(TAG, "Error stopping proxy: ${e.message}", e)
             }
         }
-    }
-
-    /**
-     * 创建通知渠道
-     */
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "代理服务",
-                NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "SecureProxy 代理服务通知"
-                setShowBadge(false)
-            }
-
-            val notificationManager = getSystemService(NotificationManager::class.java)
-            notificationManager.createNotificationChannel(channel)
-        }
-    }
-
-    /**
-     * 创建通知
-     */
-    private fun createNotification(status: String, details: String = ""): android.app.Notification {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        }
-
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val contentText = if (details.isNotEmpty()) {
-            "$status\n$details"
-        } else {
-            status
-        }
-
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("SecureProxy")
-            .setContentText(contentText)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(contentText))
-            .setSmallIcon(android.R.drawable.ic_dialog_info)  // 使用系统图标,你可以替换为自定义图标
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .build()
-    }
-
-    /**
-     * 更新通知
-     */
-    private fun updateNotification(status: String, details: String = "") {
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.notify(NOTIFICATION_ID, createNotification(status, details))
     }
 
     /**
@@ -240,18 +135,12 @@ class ProxyService : Service() {
     }
 
     /**
-     * 获取统计信息
+     * 获取统计信息 - 简化版
      */
-    suspend fun getStats(): ProxyStats {
-        val connStats = connectionManager?.getStats()
-
+    fun getStats(): ProxyStats {
         return ProxyStats(
             running = running,
-            socks5Connections = socks5Server?.getActiveConnectionCount() ?: 0,
-            httpConnections = httpProxyServer?.getActiveConnectionCount() ?: 0,
-            poolAvailable = connStats?.available ?: 0,
-            poolBusy = connStats?.busy ?: 0,
-            poolTotal = connStats?.total ?: 0
+            vpnMode = true
         )
     }
 
@@ -289,14 +178,10 @@ class ProxyService : Service() {
     }
 
     /**
-     * 代理统计信息
+     * 代理统计信息 - 简化版
      */
     data class ProxyStats(
         val running: Boolean,
-        val socks5Connections: Int,
-        val httpConnections: Int,
-        val poolAvailable: Int,
-        val poolBusy: Int,
-        val poolTotal: Int
+        val vpnMode: Boolean = true
     )
 }
