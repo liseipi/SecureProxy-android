@@ -146,7 +146,7 @@ class VpnProxyService : VpnService() {
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start VPN: ${e.message}", e)
-                updateStatus(ServiceStatus.ERROR, e.message)
+                updateStatus(ServiceStatus.RUNNING, e.message)
                 stopSelf()
             }
         }

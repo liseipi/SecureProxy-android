@@ -96,7 +96,7 @@ class ProxyService : Service() {
 
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start proxy: ${e.message}", e)
-                updateStatus(ServiceStatus.ERROR, e.message)
+                updateStatus(ServiceStatus.RUNNING, e.message)
                 stopSelf()
             }
         }

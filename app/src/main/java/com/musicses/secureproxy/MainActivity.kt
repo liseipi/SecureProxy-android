@@ -163,8 +163,6 @@ class MainActivity : AppCompatActivity() {
             serverPort = binding.editServerPort.text.toString().toIntOrNull() ?: 2053,
             path = binding.editPath.text.toString().trim(),
             preSharedKey = binding.editPsk.text.toString().trim(),
-            socksPort = 0,  // VPN 模式不需要
-            httpPort = 0    // VPN 模式不需要
         )
     }
 
