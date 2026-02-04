@@ -1,5 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- 使用 Material3 主题而不是 android 主题 -->
+    <style name="Theme.SecureProxy" parent="Theme.Material3.Light.NoActionBar">
+        <!-- 主色调 -->
+        <item name="colorPrimary">@color/purple_500</item>
+        <item name="colorPrimaryVariant">@color/purple_700</item>
+        <item name="colorOnPrimary">@android:color/white</item>
 
-    <style name="Theme.SecureProxy" parent="android:Theme.Material.Light.NoActionBar" />
+        <!-- 次要色调 -->
+        <item name="colorSecondary">@color/teal_200</item>
+        <item name="colorSecondaryVariant">@color/teal_700</item>
+        <item name="colorOnSecondary">@android:color/black</item>
+    </style>
 </resources>

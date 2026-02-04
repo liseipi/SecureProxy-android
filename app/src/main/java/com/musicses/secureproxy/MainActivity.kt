@@ -13,6 +13,7 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.musicses.secureproxy.databinding.ActivityMainBinding
@@ -284,7 +285,13 @@ class MainActivity : AppCompatActivity() {
                 putExtra(VpnProxyService.EXTRA_CONFIG, config)
             }
 
-            startForegroundService(intent)
+            // 使用兼容的方式启动前台服务
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(intent)
+            } else {
+                startService(intent)
+            }
+
             bindService(Intent(this, VpnProxyService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
 
             updateUIState(running = true)
