@@ -11,6 +11,7 @@
 .DS_Store
 /build
 /captures
+.kotlin/errors/
 .externalNativeBuild
 .cxx
 local.properties
