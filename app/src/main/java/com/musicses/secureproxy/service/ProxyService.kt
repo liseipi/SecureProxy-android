@@ -11,7 +11,7 @@ import kotlinx.coroutines.*
 
 /**
  * 代理服务 - 简化版，仅用于VPN配置管理
- * 实际的VPN功能由 VpnProxyService 提供
+ * 实际的VPN功能由 com.musicses.secureproxy.service.VpnProxyService 提供
  */
 class ProxyService : Service() {
 

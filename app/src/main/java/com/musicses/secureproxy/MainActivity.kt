@@ -4,7 +4,9 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
@@ -30,6 +32,7 @@ class MainActivity : AppCompatActivity() {
         private const val KEY_SERVER_PORT = "server_port"
         private const val KEY_PATH = "path"
         private const val KEY_PSK = "psk"
+        private const val REQUEST_NOTIFICATION_PERMISSION = 100
     }
 
     private lateinit var binding: ActivityMainBinding
@@ -50,55 +53,128 @@ class MainActivity : AppCompatActivity() {
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            val binder = service as VpnProxyService.VpnBinder
-            vpnService = binder.getService()
-            serviceBound = true
+            try {
+                val binder = service as VpnProxyService.VpnBinder
+                vpnService = binder.getService()
+                serviceBound = true
 
-            vpnService?.setStatusCallback { status ->
-                runOnUiThread {
-                    updateUI(status)
+                vpnService?.setStatusCallback { status ->
+                    runOnUiThread {
+                        updateUI(status)
+                    }
                 }
-            }
 
-            startStatsUpdate()
+                startStatsUpdate()
+                Log.d(TAG, "Service connected successfully")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in onServiceConnected", e)
+                Toast.makeText(this@MainActivity, "服务连接失败: ${e.message}", Toast.LENGTH_SHORT).show()
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
             vpnService = null
             serviceBound = false
+            Log.d(TAG, "Service disconnected")
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
 
-        setupUI()
-        loadConfig()
+        try {
+            Log.d(TAG, "MainActivity onCreate started")
+
+            // 初始化 ViewBinding
+            binding = ActivityMainBinding.inflate(layoutInflater)
+            setContentView(binding.root)
+
+            Log.d(TAG, "ViewBinding initialized")
+
+            // 请求通知权限（Android 13+）
+            requestNotificationPermissionIfNeeded()
+
+            // 设置 UI
+            setupUI()
+
+            // 加载配置
+            loadConfig()
+
+            Log.d(TAG, "MainActivity created successfully")
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onCreate", e)
+            Toast.makeText(this, "启动错误: ${e.message}", Toast.LENGTH_LONG).show()
+
+            // 显示错误对话框
+            MaterialAlertDialogBuilder(this)
+                .setTitle("启动错误")
+                .setMessage("应用启动失败:\n${e.message}\n\n${e.stackTraceToString()}")
+                .setPositiveButton("退出") { _, _ -> finish() }
+                .setCancelable(false)
+                .show()
+        }
+    }
+
+    /**
+     * 请求通知权限（Android 13+）
+     */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(
+                    arrayOf(android.Manifest.permission.POST_NOTIFICATIONS),
+                    REQUEST_NOTIFICATION_PERMISSION
+                )
+            }
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+        if (requestCode == REQUEST_NOTIFICATION_PERMISSION) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                Log.d(TAG, "Notification permission granted")
+            } else {
+                Toast.makeText(this, "通知权限被拒绝，部分功能可能无法使用", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     /**
      * 设置 UI
      */
     private fun setupUI() {
-        binding.btnStart.setOnClickListener {
-            if (validateConfig()) {
-                requestVpnPermission()
+        try {
+            binding.btnStart.setOnClickListener {
+                if (validateConfig()) {
+                    requestVpnPermission()
+                }
             }
-        }
 
-        binding.btnStop.setOnClickListener {
-            stopVpnService()
-        }
+            binding.btnStop.setOnClickListener {
+                stopVpnService()
+            }
 
-        binding.btnSave.setOnClickListener {
-            saveConfig()
-            Toast.makeText(this, "配置已保存", Toast.LENGTH_SHORT).show()
-        }
+            binding.btnSave.setOnClickListener {
+                saveConfig()
+                Toast.makeText(this, "配置已保存", Toast.LENGTH_SHORT).show()
+            }
 
-        binding.btnHelp.setOnClickListener {
-            showHelp()
+            binding.btnHelp.setOnClickListener {
+                showHelp()
+            }
+
+            Log.d(TAG, "UI setup completed")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in setupUI", e)
+            throw e
         }
     }
 
@@ -106,27 +182,40 @@ class MainActivity : AppCompatActivity() {
      * 加载配置
      */
     private fun loadConfig() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        try {
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
 
-        binding.editSniHost.setText(prefs.getString(KEY_SNI_HOST, ""))
-        binding.editProxyIp.setText(prefs.getString(KEY_PROXY_IP, ""))
-        binding.editServerPort.setText(prefs.getString(KEY_SERVER_PORT, "2053"))
-        binding.editPath.setText(prefs.getString(KEY_PATH, "/v1"))
-        binding.editPsk.setText(prefs.getString(KEY_PSK, ""))
+            binding.editSniHost.setText(prefs.getString(KEY_SNI_HOST, ""))
+            binding.editProxyIp.setText(prefs.getString(KEY_PROXY_IP, ""))
+            binding.editServerPort.setText(prefs.getString(KEY_SERVER_PORT, "2053"))
+            binding.editPath.setText(prefs.getString(KEY_PATH, "/v1"))
+            binding.editPsk.setText(prefs.getString(KEY_PSK, ""))
+
+            Log.d(TAG, "Configuration loaded")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error loading config", e)
+            Toast.makeText(this, "加载配置失败", Toast.LENGTH_SHORT).show()
+        }
     }
 
     /**
      * 保存配置
      */
     private fun saveConfig() {
-        val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        prefs.edit().apply {
-            putString(KEY_SNI_HOST, binding.editSniHost.text.toString())
-            putString(KEY_PROXY_IP, binding.editProxyIp.text.toString())
-            putString(KEY_SERVER_PORT, binding.editServerPort.text.toString())
-            putString(KEY_PATH, binding.editPath.text.toString())
-            putString(KEY_PSK, binding.editPsk.text.toString())
-            apply()
+        try {
+            val prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().apply {
+                putString(KEY_SNI_HOST, binding.editSniHost.text.toString())
+                putString(KEY_PROXY_IP, binding.editProxyIp.text.toString())
+                putString(KEY_SERVER_PORT, binding.editServerPort.text.toString())
+                putString(KEY_PATH, binding.editPath.text.toString())
+                putString(KEY_PSK, binding.editPsk.text.toString())
+                apply()
+            }
+            Log.d(TAG, "Configuration saved")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving config", e)
+            Toast.makeText(this, "保存配置失败", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -136,15 +225,11 @@ class MainActivity : AppCompatActivity() {
     private fun validateConfig(): Boolean {
         val config = getConfigFromUI()
 
-        if (!config.validate()) {
+        val error = config.getValidationError()
+        if (error != null) {
             MaterialAlertDialogBuilder(this)
                 .setTitle("配置错误")
-                .setMessage("请检查配置:\n" +
-                        "- SNI 主机不能为空\n" +
-                        "- 代理 IP 不能为空\n" +
-                        "- 服务器端口范围: 1-65535\n" +
-                        "- 路径不能为空\n" +
-                        "- PSK 必须是 64 位十六进制字符")
+                .setMessage(error)
                 .setPositiveButton("确定", null)
                 .show()
             return false
@@ -170,13 +255,18 @@ class MainActivity : AppCompatActivity() {
      * 请求 VPN 权限
      */
     private fun requestVpnPermission() {
-        val intent = VpnService.prepare(this)
-        if (intent != null) {
-            // 需要请求权限
-            vpnPermissionLauncher.launch(intent)
-        } else {
-            // 已经有权限
-            actuallyStartVpn()
+        try {
+            val intent = VpnService.prepare(this)
+            if (intent != null) {
+                // 需要请求权限
+                vpnPermissionLauncher.launch(intent)
+            } else {
+                // 已经有权限
+                actuallyStartVpn()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error requesting VPN permission", e)
+            Toast.makeText(this, "请求 VPN 权限失败: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -184,60 +274,79 @@ class MainActivity : AppCompatActivity() {
      * 实际启动 VPN
      */
     private fun actuallyStartVpn() {
-        saveConfig()
+        try {
+            saveConfig()
 
-        val config = getConfigFromUI()
+            val config = getConfigFromUI()
 
-        val intent = Intent(this, VpnProxyService::class.java).apply {
-            action = VpnProxyService.ACTION_START
-            putExtra(VpnProxyService.EXTRA_CONFIG, config)
+            val intent = Intent(this, VpnProxyService::class.java).apply {
+                action = VpnProxyService.ACTION_START
+                putExtra(VpnProxyService.EXTRA_CONFIG, config)
+            }
+
+            startForegroundService(intent)
+            bindService(Intent(this, VpnProxyService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
+
+            updateUIState(running = true)
+
+            Log.d(TAG, "VPN service starting")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting VPN", e)
+            Toast.makeText(this, "启动 VPN 失败: ${e.message}", Toast.LENGTH_LONG).show()
+            updateUIState(running = false)
         }
-
-        startForegroundService(intent)
-        bindService(Intent(this, VpnProxyService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
-
-        updateUIState(running = true)
     }
 
     /**
      * 停止 VPN 服务
      */
     private fun stopVpnService() {
-        val intent = Intent(this, VpnProxyService::class.java).apply {
-            action = VpnProxyService.ACTION_STOP
+        try {
+            val intent = Intent(this, VpnProxyService::class.java).apply {
+                action = VpnProxyService.ACTION_STOP
+            }
+
+            startService(intent)
+
+            if (serviceBound) {
+                unbindService(serviceConnection)
+                serviceBound = false
+            }
+
+            updateUIState(running = false)
+
+            Log.d(TAG, "VPN service stopping")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping VPN", e)
+            Toast.makeText(this, "停止 VPN 失败: ${e.message}", Toast.LENGTH_SHORT).show()
         }
-
-        startService(intent)
-
-        if (serviceBound) {
-            unbindService(serviceConnection)
-            serviceBound = false
-        }
-
-        updateUIState(running = false)
     }
 
     /**
      * 更新 UI 状态
      */
     private fun updateUIState(running: Boolean) {
-        binding.btnStart.isEnabled = !running
-        binding.btnStop.isEnabled = running
-        binding.btnSave.isEnabled = !running
+        try {
+            binding.btnStart.isEnabled = !running
+            binding.btnStop.isEnabled = running
+            binding.btnSave.isEnabled = !running
 
-        binding.editSniHost.isEnabled = !running
-        binding.editProxyIp.isEnabled = !running
-        binding.editServerPort.isEnabled = !running
-        binding.editPath.isEnabled = !running
-        binding.editPsk.isEnabled = !running
+            binding.editSniHost.isEnabled = !running
+            binding.editProxyIp.isEnabled = !running
+            binding.editServerPort.isEnabled = !running
+            binding.editPath.isEnabled = !running
+            binding.editPsk.isEnabled = !running
 
-        if (running) {
-            binding.statusText.text = "VPN 运行中"
-            binding.statusText.setTextColor(getColor(android.R.color.holo_green_dark))
-        } else {
-            binding.statusText.text = "VPN 已停止"
-            binding.statusText.setTextColor(getColor(android.R.color.holo_red_dark))
-            binding.statsText.text = ""
+            if (running) {
+                binding.statusText.text = "VPN 运行中"
+                binding.statusText.setTextColor(getColor(android.R.color.holo_green_dark))
+            } else {
+                binding.statusText.text = "VPN 已停止"
+                binding.statusText.setTextColor(getColor(android.R.color.holo_red_dark))
+                binding.statsText.text = ""
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating UI state", e)
         }
     }
 
@@ -245,30 +354,34 @@ class MainActivity : AppCompatActivity() {
      * 更新 UI
      */
     private fun updateUI(status: VpnProxyService.ServiceStatus) {
-        when (status.state) {
-            VpnProxyService.ServiceStatus.State.STARTING -> {
-                binding.statusText.text = "正在启动 VPN..."
-                binding.statusText.setTextColor(getColor(android.R.color.holo_orange_dark))
+        try {
+            when (status.state) {
+                VpnProxyService.ServiceStatus.State.STARTING -> {
+                    binding.statusText.text = "正在启动 VPN..."
+                    binding.statusText.setTextColor(getColor(android.R.color.holo_orange_dark))
+                }
+                VpnProxyService.ServiceStatus.State.RUNNING -> {
+                    binding.statusText.text = "VPN 已连接"
+                    binding.statusText.setTextColor(getColor(android.R.color.holo_green_dark))
+                }
+                VpnProxyService.ServiceStatus.State.STOPPING -> {
+                    binding.statusText.text = "正在停止 VPN..."
+                    binding.statusText.setTextColor(getColor(android.R.color.holo_orange_dark))
+                }
+                VpnProxyService.ServiceStatus.State.STOPPED -> {
+                    binding.statusText.text = "VPN 已断开"
+                    binding.statusText.setTextColor(getColor(android.R.color.holo_red_dark))
+                    updateUIState(running = false)
+                }
+                VpnProxyService.ServiceStatus.State.ERROR -> {
+                    binding.statusText.text = "错误: ${status.message}"
+                    binding.statusText.setTextColor(getColor(android.R.color.holo_red_dark))
+                    updateUIState(running = false)
+                }
+                else -> {}
             }
-            VpnProxyService.ServiceStatus.State.RUNNING -> {
-                binding.statusText.text = "VPN 已连接"
-                binding.statusText.setTextColor(getColor(android.R.color.holo_green_dark))
-            }
-            VpnProxyService.ServiceStatus.State.STOPPING -> {
-                binding.statusText.text = "正在停止 VPN..."
-                binding.statusText.setTextColor(getColor(android.R.color.holo_orange_dark))
-            }
-            VpnProxyService.ServiceStatus.State.STOPPED -> {
-                binding.statusText.text = "VPN 已断开"
-                binding.statusText.setTextColor(getColor(android.R.color.holo_red_dark))
-                updateUIState(running = false)
-            }
-            VpnProxyService.ServiceStatus.State.ERROR -> {
-                binding.statusText.text = "错误: ${status.message}"
-                binding.statusText.setTextColor(getColor(android.R.color.holo_red_dark))
-                updateUIState(running = false)
-            }
-            else -> {}
+        } catch (e: Exception) {
+            Log.e(TAG, "Error updating UI", e)
         }
     }
 
@@ -277,22 +390,26 @@ class MainActivity : AppCompatActivity() {
      */
     private fun startStatsUpdate() {
         lifecycleScope.launch {
-            while (isActive && serviceBound) {
-                vpnService?.let { service ->
-                    val stats = service.getStats()
+            try {
+                while (isActive && serviceBound) {
+                    vpnService?.let { service ->
+                        val stats = service.getStats()
 
-                    if (stats.running) {
-                        val statsText = buildString {
-                            appendLine("全局代理已启用")
-                            appendLine("TCP 连接: ${stats.tcpConnections}")
-                            appendLine("连接池: ${stats.poolAvailable}/${stats.poolTotal} 可用")
+                        if (stats.running) {
+                            val statsText = buildString {
+                                appendLine("全局代理已启用")
+                                appendLine("TCP 连接: ${stats.tcpConnections}")
+                                appendLine("连接池: ${stats.poolAvailable}/${stats.poolTotal} 可用")
+                            }
+
+                            binding.statsText.text = statsText
                         }
-
-                        binding.statsText.text = statsText
                     }
-                }
 
-                delay(2000)
+                    delay(2000)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in stats update", e)
             }
         }
     }
@@ -333,8 +450,13 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (serviceBound) {
-            unbindService(serviceConnection)
+        try {
+            if (serviceBound) {
+                unbindService(serviceConnection)
+            }
+            Log.d(TAG, "MainActivity destroyed")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in onDestroy", e)
         }
     }
 }
