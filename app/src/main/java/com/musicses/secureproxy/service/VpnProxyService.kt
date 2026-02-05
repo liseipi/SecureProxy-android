@@ -23,7 +23,7 @@ import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * VPN 代理服务 - 全局代理
+ * VPN 代理服务 - 修复版
  */
 class VpnProxyService : VpnService() {
 
@@ -61,9 +61,8 @@ class VpnProxyService : VpnService() {
     private var processingJob: Job? = null
     private var statusCallback: ((ServiceStatus) -> Unit)? = null
 
-    // TCP 连接映射表: localPort -> TcpConnection
-    private val tcpConnections = ConcurrentHashMap<Int, TcpConnection>()
-    private var nextLocalPort = 10000
+    // TCP 连接映射
+    private val tcpConnections = ConcurrentHashMap<String, TcpConnection>()
 
     inner class VpnBinder : Binder() {
         fun getService(): VpnProxyService = this@VpnProxyService
@@ -103,9 +102,6 @@ class VpnProxyService : VpnService() {
         return START_STICKY
     }
 
-    /**
-     * 启动 VPN
-     */
     private fun startVpn(config: ProxyConfig) {
         if (running) {
             Log.w(TAG, "VPN already running")
@@ -116,16 +112,13 @@ class VpnProxyService : VpnService() {
             try {
                 updateStatus(ServiceStatus.STARTING)
 
-                // 创建通知
                 val notification = createNotification("正在启动...")
                 startForeground(NOTIFICATION_ID, notification)
 
-                // 初始化连接管理器
                 connectionManager = ConnectionManager(config, scope).apply {
                     initialize()
                 }
 
-                // 建立 VPN 接口
                 vpnInterface = establishVpnInterface()
 
                 if (vpnInterface == null) {
@@ -134,7 +127,6 @@ class VpnProxyService : VpnService() {
 
                 running = true
 
-                // 开始处理数据包
                 processingJob = scope.launch {
                     processPackets()
                 }
@@ -145,16 +137,13 @@ class VpnProxyService : VpnService() {
                 Log.i(TAG, "VPN started successfully")
 
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to start VPN: ${e.message}", e)
+                Log.e(TAG, "Failed to start VPN", e)
                 updateStatus(ServiceStatus.ERROR(e.message))
                 stopSelf()
             }
         }
     }
 
-    /**
-     * 建立 VPN 接口
-     */
     private fun establishVpnInterface(): ParcelFileDescriptor? {
         return Builder()
             .setSession("SecureProxy")
@@ -167,9 +156,6 @@ class VpnProxyService : VpnService() {
             .establish()
     }
 
-    /**
-     * 处理数据包
-     */
     private suspend fun processPackets() = withContext(Dispatchers.IO) {
         val vpnInput = FileInputStream(vpnInterface!!.fileDescriptor)
         val vpnOutput = FileOutputStream(vpnInterface!!.fileDescriptor)
@@ -177,10 +163,11 @@ class VpnProxyService : VpnService() {
         val packet = ByteBuffer.allocate(VPN_MTU)
 
         try {
+            Log.d(TAG, "开始处理数据包...")
+
             while (isActive && running) {
                 packet.clear()
 
-                // 从 VPN 读取数据包
                 val length = vpnInput.channel.read(packet)
                 if (length <= 0) {
                     delay(10)
@@ -189,36 +176,38 @@ class VpnProxyService : VpnService() {
 
                 packet.flip()
 
-                // 解析 IP 包
-                val ipVersion = (packet.get(0).toInt() shr 4) and 0x0F
-
-                if (ipVersion == 4) {
-                    processIPv4Packet(packet, vpnOutput)
+                try {
+                    val ipVersion = (packet.get(0).toInt() shr 4) and 0x0F
+                    if (ipVersion == 4) {
+                        processIPv4Packet(packet, vpnOutput)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "处理数据包失败: ${e.message}")
                 }
             }
         } catch (e: Exception) {
             if (running) {
-                Log.e(TAG, "Error processing packets: ${e.message}", e)
+                Log.e(TAG, "Error processing packets", e)
             }
+        } finally {
+            Log.d(TAG, "停止处理数据包")
         }
     }
 
-    /**
-     * 处理 IPv4 数据包
-     */
     private suspend fun processIPv4Packet(packet: ByteBuffer, vpnOutput: FileOutputStream) {
         if (packet.remaining() < 20) return
 
         val headerStart = packet.position()
-
-        // 解析 IP 头
         val versionAndIHL = packet.get().toInt() and 0xFF
         val ihl = (versionAndIHL and 0x0F) * 4
 
-        packet.position(headerStart + 9)
+        packet.get() // TOS
+        packet.short // Total Length
+        packet.position(headerStart + 8)
+        packet.get() // TTL
         val protocol = packet.get().toInt() and 0xFF
-
         packet.position(headerStart + 12)
+
         val srcAddress = ByteArray(4)
         packet.get(srcAddress)
 
@@ -228,18 +217,18 @@ class VpnProxyService : VpnService() {
         packet.position(headerStart + ihl)
 
         when (protocol) {
-            6 -> processTcpPacket(packet, srcAddress, dstAddress, ihl, vpnOutput)
-            17 -> processUdpPacket(packet, srcAddress, dstAddress)
+            6 -> {
+                Log.d(TAG, "TCP: ${formatIp(srcAddress)} -> ${formatIp(dstAddress)}")
+                processTcpPacket(packet, srcAddress, dstAddress, headerStart, ihl, vpnOutput)
+            }
         }
     }
 
-    /**
-     * 处理 TCP 数据包
-     */
     private suspend fun processTcpPacket(
         packet: ByteBuffer,
         srcAddress: ByteArray,
         dstAddress: ByteArray,
+        ipHeaderStart: Int,
         ipHeaderLength: Int,
         vpnOutput: FileOutputStream
     ) {
@@ -247,17 +236,15 @@ class VpnProxyService : VpnService() {
 
         val tcpStart = packet.position()
 
-        // 解析 TCP 头
         val srcPort = packet.short.toInt() and 0xFFFF
         val dstPort = packet.short.toInt() and 0xFFFF
-
         val seqNum = packet.int
         val ackNum = packet.int
 
-        val dataOffsetAndFlags = packet.get().toInt() and 0xFF
-        val dataOffset = (dataOffsetAndFlags shr 4) * 4
+        val dataOffsetAndFlags = packet.short.toInt() and 0xFFFF
+        val dataOffset = ((dataOffsetAndFlags shr 12) and 0x0F) * 4
+        val flags = dataOffsetAndFlags and 0x3F
 
-        val flags = packet.get().toInt() and 0xFF
         val syn = (flags and TCP_SYN) != 0
         val ack = (flags and TCP_ACK) != 0
         val fin = (flags and TCP_FIN) != 0
@@ -266,101 +253,94 @@ class VpnProxyService : VpnService() {
 
         packet.position(tcpStart + dataOffset)
 
-        val dstHost = dstAddress.joinToString(".") { (it.toInt() and 0xFF).toString() }
+        val dstHost = formatIp(dstAddress)
         val payloadLength = packet.remaining()
-
-        Log.d(TAG, "TCP: $srcPort -> $dstHost:$dstPort seq=$seqNum ack=$ackNum flags=${flagsToString(flags)} payload=$payloadLength")
 
         val connKey = "$srcPort-$dstHost-$dstPort"
 
-        if (syn && !ack) {
-            // 新连接请求
-            handleTcpSyn(connKey, srcPort, dstHost, dstPort, seqNum, srcAddress, dstAddress, vpnOutput)
-        } else if (fin) {
-            // 关闭连接
-            handleTcpFin(connKey, srcPort, dstHost, dstPort, seqNum, ackNum, srcAddress, dstAddress, vpnOutput)
-        } else if (rst) {
-            // 重置连接
-            handleTcpRst(connKey)
-        } else if (payloadLength > 0) {
-            // 数据传输
-            handleTcpData(connKey, packet, seqNum, ackNum, srcPort, dstPort, srcAddress, dstAddress, vpnOutput)
-        } else if (ack) {
-            // 纯ACK包
-            handleTcpAck(connKey, ackNum)
+        Log.d(TAG, "$connKey [${flagsToString(flags)}] seq=$seqNum ack=$ackNum payload=$payloadLength")
+
+        try {
+            when {
+                syn && !ack -> handleTcpSyn(connKey, srcPort, dstHost, dstPort, seqNum, srcAddress, dstAddress, vpnOutput)
+                fin -> handleTcpFin(connKey, seqNum, ackNum, srcPort, dstPort, srcAddress, dstAddress, vpnOutput)
+                rst -> handleTcpRst(connKey)
+                payloadLength > 0 -> {
+                    val payload = ByteArray(payloadLength)
+                    packet.get(payload)
+                    handleTcpData(connKey, payload, seqNum, ackNum, srcPort, dstPort, srcAddress, dstAddress, vpnOutput)
+                }
+                ack -> handleTcpAck(connKey, ackNum)
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "TCP处理失败 ($connKey)", e)
+            sendTcpPacket(vpnOutput, dstAddress, srcAddress, dstPort, srcPort, 0, 0, TCP_RST, null)
         }
     }
 
-    /**
-     * 处理 TCP SYN
-     */
     private suspend fun handleTcpSyn(
         connKey: String,
         srcPort: Int,
         dstHost: String,
         dstPort: Int,
-        seqNum: Int,
+        clientSeq: Int,
         srcAddress: ByteArray,
         dstAddress: ByteArray,
         vpnOutput: FileOutputStream
     ) {
+        if (tcpConnections.containsKey(connKey)) return
+
         scope.launch {
             try {
-                val ws = connectionManager?.acquire() ?: return@launch
+                Log.i(TAG, "新连接: $connKey")
+
+                val ws = connectionManager?.acquire() ?: throw Exception("无法获取WebSocket")
+
                 ws.sendConnect(dstHost, dstPort)
+                Log.d(TAG, "已连接远程: $dstHost:$dstPort")
+
+                val serverSeq = (Math.random() * Int.MAX_VALUE).toInt()
 
                 val connection = TcpConnection(
+                    key = connKey,
                     localPort = srcPort,
                     remoteHost = dstHost,
                     remotePort = dstPort,
                     webSocket = ws,
                     connected = true,
-                    seqNum = seqNum + 1,
-                    ackNum = (Math.random() * Int.MAX_VALUE).toInt()
+                    clientSeq = clientSeq + 1,
+                    serverSeq = serverSeq + 1,
+                    srcAddress = srcAddress,
+                    dstAddress = dstAddress
                 )
 
-                tcpConnections[srcPort] = connection
+                tcpConnections[connKey] = connection
 
-                // 发送 SYN-ACK
-                sendTcpResponse(
+                sendTcpPacket(
                     vpnOutput,
-                    dstAddress,
-                    srcAddress,
-                    dstPort,
-                    srcPort,
-                    connection.ackNum,
-                    connection.seqNum,
-                    TCP_SYN or TCP_ACK
+                    dstAddress, srcAddress,
+                    dstPort, srcPort,
+                    serverSeq,
+                    clientSeq + 1,
+                    TCP_SYN or TCP_ACK,
+                    null
                 )
 
-                connection.ackNum++
+                Log.d(TAG, "已发送 SYN-ACK: $connKey")
 
-                // 启动接收循环
-                startReceiveLoop(connection, srcAddress, dstAddress, vpnOutput)
+                startReceiveLoop(connection, vpnOutput)
 
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to establish connection: ${e.message}")
-                sendTcpResponse(
-                    vpnOutput,
-                    dstAddress,
-                    srcAddress,
-                    dstPort,
-                    srcPort,
-                    0,
-                    0,
-                    TCP_RST
-                )
-                tcpConnections.remove(srcPort)
+                Log.e(TAG, "连接失败 ($connKey)", e)
+                tcpConnections.remove(connKey)
+                sendTcpPacket(vpnOutput, dstAddress, srcAddress, dstPort, srcPort, 0, 0, TCP_RST, null)
             }
         }
     }
 
-    /**
-     * 处理 TCP 数据
-     */
     private suspend fun handleTcpData(
         connKey: String,
-        packet: ByteBuffer,
+        data: ByteArray,
         seqNum: Int,
         ackNum: Int,
         srcPort: Int,
@@ -369,136 +349,120 @@ class VpnProxyService : VpnService() {
         dstAddress: ByteArray,
         vpnOutput: FileOutputStream
     ) {
-        val connection = tcpConnections[srcPort] ?: return
+        val connection = tcpConnections[connKey]
+        if (connection == null) {
+            sendTcpPacket(vpnOutput, dstAddress, srcAddress, dstPort, srcPort, 0, 0, TCP_RST, null)
+            return
+        }
 
         if (!connection.connected) return
 
-        val data = ByteArray(packet.remaining())
-        packet.get(data)
-
         scope.launch {
             try {
-                connection.webSocket?.send(data)
-                connection.seqNum = ackNum
+                Log.d(TAG, "发送数据 ($connKey): ${data.size} bytes")
 
-                // 发送 ACK
-                sendTcpResponse(
+                connection.webSocket?.send(data)
+                connection.clientSeq = seqNum + data.size
+
+                sendTcpPacket(
                     vpnOutput,
-                    dstAddress,
-                    srcAddress,
-                    dstPort,
-                    srcPort,
-                    connection.ackNum,
-                    seqNum + data.size,
-                    TCP_ACK
+                    dstAddress, srcAddress,
+                    dstPort, srcPort,
+                    connection.serverSeq,
+                    connection.clientSeq,
+                    TCP_ACK,
+                    null
                 )
+
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to send data: ${e.message}")
-                closeTcpConnection(srcPort)
+                Log.e(TAG, "发送失败 ($connKey)", e)
+                closeTcpConnection(connKey, vpnOutput)
             }
         }
     }
 
-    /**
-     * 处理 TCP FIN
-     */
+    private fun handleTcpAck(connKey: String, ackNum: Int) {
+        // ACK处理
+    }
+
     private suspend fun handleTcpFin(
         connKey: String,
-        srcPort: Int,
-        dstHost: String,
-        dstPort: Int,
         seqNum: Int,
         ackNum: Int,
+        srcPort: Int,
+        dstPort: Int,
         srcAddress: ByteArray,
         dstAddress: ByteArray,
         vpnOutput: FileOutputStream
     ) {
-        val connection = tcpConnections[srcPort]
-
+        val connection = tcpConnections[connKey]
         if (connection != null) {
-            // 发送 FIN-ACK
-            sendTcpResponse(
+            Log.i(TAG, "FIN ($connKey)")
+
+            sendTcpPacket(
                 vpnOutput,
-                dstAddress,
-                srcAddress,
-                dstPort,
-                srcPort,
-                connection.ackNum,
+                dstAddress, srcAddress,
+                dstPort, srcPort,
+                connection.serverSeq,
                 seqNum + 1,
-                TCP_FIN or TCP_ACK
+                TCP_ACK,
+                null
             )
 
-            connection.ackNum++
+            sendTcpPacket(
+                vpnOutput,
+                dstAddress, srcAddress,
+                dstPort, srcPort,
+                connection.serverSeq,
+                seqNum + 1,
+                TCP_FIN or TCP_ACK,
+                null
+            )
         }
 
-        closeTcpConnection(srcPort)
+        closeTcpConnection(connKey, vpnOutput)
     }
 
-    /**
-     * 处理 TCP RST
-     */
     private fun handleTcpRst(connKey: String) {
-        val portMatch = connKey.split("-").firstOrNull()?.toIntOrNull()
-        if (portMatch != null) {
-            closeTcpConnection(portMatch)
-        }
+        Log.i(TAG, "RST ($connKey)")
+        closeTcpConnection(connKey, null)
     }
 
-    /**
-     * 处理 TCP ACK
-     */
-    private fun handleTcpAck(connKey: String, ackNum: Int) {
-        val portMatch = connKey.split("-").firstOrNull()?.toIntOrNull()
-        if (portMatch != null) {
-            tcpConnections[portMatch]?.let { connection ->
-                connection.seqNum = ackNum
-            }
-        }
-    }
-
-    /**
-     * 启动接收循环
-     */
-    private fun startReceiveLoop(
-        connection: TcpConnection,
-        srcAddress: ByteArray,
-        dstAddress: ByteArray,
-        vpnOutput: FileOutputStream
-    ) {
+    private fun startReceiveLoop(connection: TcpConnection, vpnOutput: FileOutputStream) {
         scope.launch {
             try {
+                Log.d(TAG, "开始接收: ${connection.key}")
+
                 while (connection.connected && connection.webSocket?.isConnected() == true) {
                     val data = connection.webSocket?.recv() ?: break
 
                     if (data.isEmpty()) break
 
-                    // 发送数据包给客户端
-                    sendTcpResponse(
+                    Log.d(TAG, "收到数据 (${connection.key}): ${data.size} bytes")
+
+                    sendTcpPacket(
                         vpnOutput,
-                        dstAddress,
-                        srcAddress,
+                        connection.dstAddress,
+                        connection.srcAddress,
                         connection.remotePort,
                         connection.localPort,
-                        connection.ackNum,
-                        connection.seqNum,
+                        connection.serverSeq,
+                        connection.clientSeq,
                         TCP_PSH or TCP_ACK,
                         data
                     )
 
-                    connection.ackNum += data.size
+                    connection.serverSeq += data.size
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Receive loop error: ${e.message}")
+                Log.e(TAG, "接收错误 (${connection.key})", e)
             } finally {
-                closeTcpConnection(connection.localPort)
+                closeTcpConnection(connection.key, vpnOutput)
             }
         }
     }
 
-    /**
-     * 发送 TCP 响应包
-     */
-    private fun sendTcpResponse(
+    private fun sendTcpPacket(
         vpnOutput: FileOutputStream,
         srcAddress: ByteArray,
         dstAddress: ByteArray,
@@ -507,7 +471,7 @@ class VpnProxyService : VpnService() {
         seqNum: Int,
         ackNum: Int,
         flags: Int,
-        data: ByteArray? = null
+        data: ByteArray?
     ) {
         try {
             val dataLen = data?.size ?: 0
@@ -517,63 +481,49 @@ class VpnProxyService : VpnService() {
 
             val packet = ByteBuffer.allocate(totalLen)
 
-            // IP 头部
-            packet.put((0x45).toByte()) // Version=4, IHL=5
-            packet.put(0) // DSCP/ECN
-            packet.putShort(totalLen.toShort()) // Total Length
-            packet.putShort(0) // Identification
-            packet.putShort(0) // Flags + Fragment Offset
-            packet.put(64) // TTL
-            packet.put(6) // Protocol = TCP
-            packet.putShort(0) // Checksum (计算后填入)
-            packet.put(srcAddress) // Source IP
-            packet.put(dstAddress) // Destination IP
+            // IP 头
+            packet.put(0x45.toByte())
+            packet.put(0)
+            packet.putShort(totalLen.toShort())
+            packet.putShort(0)
+            packet.putShort(0x4000.toShort())
+            packet.put(64)
+            packet.put(6)
+            packet.putShort(0)
+            packet.put(srcAddress)
+            packet.put(dstAddress)
 
-            // 计算IP校验和
-            val ipChecksumPos = 10
             val ipChecksum = calculateChecksum(packet.array(), 0, ipHeaderLen)
-            packet.putShort(ipChecksumPos, ipChecksum)
+            packet.putShort(10, ipChecksum)
 
-            // TCP 头部
+            // TCP 头
             val tcpStart = packet.position()
-            packet.putShort(srcPort.toShort()) // Source Port
-            packet.putShort(dstPort.toShort()) // Destination Port
-            packet.putInt(seqNum) // Sequence Number
-            packet.putInt(ackNum) // Acknowledgment Number
-            packet.put(((tcpHeaderLen / 4) shl 4).toByte()) // Data Offset
-            packet.put(flags.toByte()) // Flags
-            packet.putShort(65535.toShort()) // Window Size
-            packet.putShort(0) // Checksum (计算后填入)
-            packet.putShort(0) // Urgent Pointer
+            packet.putShort(srcPort.toShort())
+            packet.putShort(dstPort.toShort())
+            packet.putInt(seqNum)
+            packet.putInt(ackNum)
+            packet.put(0x50.toByte())
+            packet.put(flags.toByte())
+            packet.putShort(65535.toShort())
+            packet.putShort(0)
+            packet.putShort(0)
 
-            // 数据
-            if (data != null && data.isNotEmpty()) {
+            if (data != null) {
                 packet.put(data)
             }
 
-            // 计算TCP校验和
-            val tcpChecksumPos = tcpStart + 16
-            val tcpChecksum = calculateTcpChecksum(
-                packet.array(),
-                srcAddress,
-                dstAddress,
-                tcpStart,
-                tcpHeaderLen + dataLen
-            )
-            packet.putShort(tcpChecksumPos, tcpChecksum)
+            val tcpChecksum = calculateTcpChecksum(packet.array(), srcAddress, dstAddress, tcpStart, tcpHeaderLen + dataLen)
+            packet.putShort(tcpStart + 16, tcpChecksum)
 
-            // 写入VPN接口
             packet.position(0)
+            packet.limit(totalLen)
             vpnOutput.channel.write(packet)
 
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to send TCP response: ${e.message}")
+            Log.e(TAG, "发送TCP包失败", e)
         }
     }
 
-    /**
-     * 计算校验和
-     */
     private fun calculateChecksum(data: ByteArray, offset: Int, length: Int): Short {
         var sum = 0L
         var i = offset
@@ -594,9 +544,6 @@ class VpnProxyService : VpnService() {
         return (sum.inv() and 0xFFFF).toShort()
     }
 
-    /**
-     * 计算TCP校验和
-     */
     private fun calculateTcpChecksum(
         packet: ByteArray,
         srcAddress: ByteArray,
@@ -608,40 +555,32 @@ class VpnProxyService : VpnService() {
         pseudoHeader.put(srcAddress)
         pseudoHeader.put(dstAddress)
         pseudoHeader.put(0)
-        pseudoHeader.put(6) // TCP protocol
+        pseudoHeader.put(6)
         pseudoHeader.putShort(tcpLength.toShort())
         pseudoHeader.put(packet, tcpOffset, tcpLength)
 
         return calculateChecksum(pseudoHeader.array(), 0, pseudoHeader.position())
     }
 
-    /**
-     * 关闭TCP连接
-     */
-    private fun closeTcpConnection(localPort: Int) {
-        tcpConnections.remove(localPort)?.let { connection ->
+    private fun closeTcpConnection(connKey: String, vpnOutput: FileOutputStream?) {
+        tcpConnections.remove(connKey)?.let { connection ->
+            Log.i(TAG, "关闭: $connKey")
             connection.connected = false
+
             scope.launch {
-                connection.webSocket?.let { connectionManager?.release(it) }
+                try {
+                    connection.webSocket?.let { connectionManager?.release(it) }
+                } catch (e: Exception) {
+                    Log.e(TAG, "释放WebSocket失败", e)
+                }
             }
         }
     }
 
-    /**
-     * 处理 UDP 数据包
-     */
-    private suspend fun processUdpPacket(
-        packet: ByteBuffer,
-        srcAddress: ByteArray,
-        dstAddress: ByteArray
-    ) {
-        // UDP 支持可以后续添加
-        Log.d(TAG, "UDP packet received (not yet supported)")
+    private fun formatIp(address: ByteArray): String {
+        return address.joinToString(".") { (it.toInt() and 0xFF).toString() }
     }
 
-    /**
-     * 将标志位转换为字符串
-     */
     private fun flagsToString(flags: Int): String {
         val parts = mutableListOf<String>()
         if ((flags and TCP_FIN) != 0) parts.add("FIN")
@@ -649,25 +588,20 @@ class VpnProxyService : VpnService() {
         if ((flags and TCP_RST) != 0) parts.add("RST")
         if ((flags and TCP_PSH) != 0) parts.add("PSH")
         if ((flags and TCP_ACK) != 0) parts.add("ACK")
-        return parts.joinToString("|")
+        return if (parts.isEmpty()) "NONE" else parts.joinToString("|")
     }
 
-    /**
-     * 停止 VPN
-     */
     private fun stopVpn() {
         if (!running) return
 
         scope.launch {
             try {
                 updateStatus(ServiceStatus.STOPPING)
-
                 running = false
 
                 processingJob?.cancel()
                 processingJob = null
 
-                // 关闭所有连接
                 tcpConnections.values.forEach { conn ->
                     conn.webSocket?.let { connectionManager?.release(it) }
                 }
@@ -680,18 +614,14 @@ class VpnProxyService : VpnService() {
                 vpnInterface = null
 
                 updateStatus(ServiceStatus.STOPPED)
-
                 Log.i(TAG, "VPN stopped")
 
             } catch (e: Exception) {
-                Log.e(TAG, "Error stopping VPN: ${e.message}", e)
+                Log.e(TAG, "停止VPN失败", e)
             }
         }
     }
 
-    /**
-     * 创建通知渠道
-     */
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
@@ -703,14 +633,10 @@ class VpnProxyService : VpnService() {
                 setShowBadge(false)
             }
 
-            val notificationManager = getSystemService(NotificationManager::class.java)
-            notificationManager.createNotificationChannel(channel)
+            getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
         }
     }
 
-    /**
-     * 创建通知
-     */
     private fun createNotification(status: String, details: String = ""): android.app.Notification {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
@@ -723,11 +649,7 @@ class VpnProxyService : VpnService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val contentText = if (details.isNotEmpty()) {
-            "$status\n$details"
-        } else {
-            status
-        }
+        val contentText = if (details.isNotEmpty()) "$status\n$details" else status
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("SecureProxy VPN")
@@ -739,31 +661,18 @@ class VpnProxyService : VpnService() {
             .build()
     }
 
-    /**
-     * 更新通知
-     */
     private fun updateNotification(status: String, details: String = "") {
-        val notificationManager = getSystemService(NotificationManager::class.java)
-        notificationManager.notify(NOTIFICATION_ID, createNotification(status, details))
+        getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, createNotification(status, details))
     }
 
-    /**
-     * 更新状态
-     */
     private fun updateStatus(status: ServiceStatus, message: String? = null) {
         statusCallback?.invoke(status.copy(message = message))
     }
 
-    /**
-     * 设置状态回调
-     */
     fun setStatusCallback(callback: (ServiceStatus) -> Unit) {
         statusCallback = callback
     }
 
-    /**
-     * 获取统计信息
-     */
     suspend fun getStats(): VpnStats {
         val connStats = connectionManager?.getStats()
 
@@ -783,22 +692,19 @@ class VpnProxyService : VpnService() {
         Log.d(TAG, "VPN Service destroyed")
     }
 
-    /**
-     * TCP 连接
-     */
     private data class TcpConnection(
+        val key: String,
         val localPort: Int,
         val remoteHost: String,
         val remotePort: Int,
         var webSocket: SecureWebSocket? = null,
         var connected: Boolean = false,
-        var seqNum: Int = 0,
-        var ackNum: Int = 0
+        var clientSeq: Int = 0,
+        var serverSeq: Int = 0,
+        val srcAddress: ByteArray,
+        val dstAddress: ByteArray
     )
 
-    /**
-     * 服务状态
-     */
     data class ServiceStatus(
         val state: State,
         val message: String? = null
@@ -822,9 +728,6 @@ class VpnProxyService : VpnService() {
         }
     }
 
-    /**
-     * VPN 统计信息
-     */
     data class VpnStats(
         val running: Boolean,
         val tcpConnections: Int,

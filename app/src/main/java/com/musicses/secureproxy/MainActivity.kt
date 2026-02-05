@@ -103,8 +103,8 @@ class MainActivity : AppCompatActivity() {
             configManager = ServerConfigManager(this)
 
             requestNotificationPermissionIfNeeded()
-            setupUI()
-            setupConfigList()
+            setupConfigList()  // 先初始化 configAdapter
+            setupUI()  // 再设置 UI
             loadConfigs()
 
             Log.d(TAG, "MainActivity created successfully")
@@ -150,6 +150,25 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun setupConfigList() {
+        configAdapter = ServerConfigAdapter(
+            onItemClick = { position, config ->
+                selectConfig(position)
+            },
+            onEditClick = { position, config ->
+                editConfig(position)
+            },
+            onDeleteClick = { position, config ->
+                deleteConfig(position, config)
+            }
+        )
+
+        binding.recyclerConfigs.apply {
+            layoutManager = LinearLayoutManager(this@MainActivity)
+            adapter = configAdapter
+        }
+    }
+
     private fun setupUI() {
         try {
             binding.btnStart.setOnClickListener {
@@ -175,25 +194,6 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             Log.e(TAG, "Error in setupUI", e)
             throw e
-        }
-    }
-
-    private fun setupConfigList() {
-        configAdapter = ServerConfigAdapter(
-            onItemClick = { position, config ->
-                selectConfig(position)
-            },
-            onEditClick = { position, config ->
-                editConfig(position)
-            },
-            onDeleteClick = { position, config ->
-                deleteConfig(position, config)
-            }
-        )
-
-        binding.recyclerConfigs.apply {
-            layoutManager = LinearLayoutManager(this@MainActivity)
-            adapter = configAdapter
         }
     }
 
