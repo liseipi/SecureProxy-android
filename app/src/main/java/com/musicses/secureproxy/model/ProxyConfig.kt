@@ -5,12 +5,12 @@ import kotlinx.parcelize.Parcelize
 
 /**
  * 代理配置数据类 - VPN 纯净版
- * 移除了 socksPort 和 httpPort，因为 VPN 模式不需要
+ * 支持 IP 地址或域名作为代理地址
  */
 @Parcelize
 data class ProxyConfig(
     val sniHost: String,
-    val proxyIp: String,
+    val proxyIp: String,  // 可以是 IP 地址或域名
     val serverPort: Int,
     val path: String,
     val preSharedKey: String
@@ -36,11 +36,16 @@ data class ProxyConfig(
     }
 
     /**
-     * 验证 IP 地址格式
+     * 验证 IP 地址或域名格式
      */
-    private fun isValidIp(ip: String): Boolean {
+    private fun isValidIpOrDomain(address: String): Boolean {
+        // IPv4 格式
         val ipv4Regex = Regex("^((25[0-5]|(2[0-4]|1\\d|[1-9]|)\\d)\\.?\\b){4}$")
-        return ipv4Regex.matches(ip)
+        if (ipv4Regex.matches(address)) return true
+
+        // 域名格式 (简化验证)
+        val domainRegex = Regex("^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\\.)+[a-zA-Z]{2,}$")
+        return domainRegex.matches(address)
     }
 
     /**
@@ -49,8 +54,8 @@ data class ProxyConfig(
     fun getValidationError(): String? {
         return when {
             sniHost.isBlank() -> "SNI 主机不能为空"
-            proxyIp.isBlank() -> "代理 IP 不能为空"
-            !isValidIp(proxyIp) -> "代理 IP 格式不正确"
+            proxyIp.isBlank() -> "代理地址不能为空"
+            !isValidIpOrDomain(proxyIp) -> "代理地址格式不正确(需要 IP 或域名)"
             serverPort !in 1..65535 -> "服务器端口必须在 1-65535 之间"
             path.isBlank() -> "路径不能为空"
             !path.startsWith("/") -> "路径必须以 / 开头"
@@ -66,7 +71,7 @@ data class ProxyConfig(
     fun getSummary(): String {
         return """
             SNI Host: $sniHost
-            Proxy IP: $proxyIp
+            Proxy Address: $proxyIp
             Server Port: $serverPort
             Path: $path
             PSK: ${preSharedKey.take(8)}... (隐藏)
@@ -80,7 +85,7 @@ data class ProxyConfig(
         fun createDefault(): ProxyConfig {
             return ProxyConfig(
                 sniHost = "example.com",
-                proxyIp = "1.2.3.4",
+                proxyIp = "proxy.example.com",
                 serverPort = 2053,
                 path = "/v1",
                 preSharedKey = "0".repeat(64)
@@ -91,7 +96,6 @@ data class ProxyConfig(
          * 从 JSON 字符串解析
          */
         fun fromJson(json: String): ProxyConfig? {
-            // 简单的 JSON 解析，实际项目可以使用 Gson 或 kotlinx.serialization
             return try {
                 val sniHostMatch = Regex(""""sniHost":"([^"]+)"""").find(json)
                 val proxyIpMatch = Regex(""""proxyIp":"([^"]+)"""").find(json)

@@ -23,6 +23,8 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.SecureProxy">
+
+        <!-- 主Activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -30,10 +32,17 @@
             android:theme="@style/Theme.SecureProxy">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 配置编辑Activity -->
+        <activity
+            android:name=".ConfigEditorActivity"
+            android:exported="false"
+            android:label="配置编辑"
+            android:theme="@style/Theme.SecureProxy"
+            android:parentActivityName=".MainActivity"/>
 
         <!-- VPN Service -->
         <service

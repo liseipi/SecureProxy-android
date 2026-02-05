@@ -1,222 +1,203 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:fillViewport="true">
+    android:orientation="vertical">
 
-    <androidx.constraintlayout.widget.ConstraintLayout
+    <!-- 标题栏 -->
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:padding="16dp">
+        android:orientation="vertical"
+        android:padding="16dp"
+        android:background="?attr/colorPrimary"
+        android:elevation="4dp">
 
-        <!-- 标题 -->
         <TextView
-            android:id="@+id/title"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="SecureProxy VPN"
             android:textSize="28sp"
             android:textStyle="bold"
-            app:layout_constraintTop_toTopOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintEnd_toEndOf="parent"
-            android:layout_marginTop="16dp"/>
+            android:textColor="@android:color/white"/>
 
-        <!-- 状态显示 -->
-        <com.google.android.material.card.MaterialCardView
-            android:id="@+id/statusCard"
-            android:layout_width="match_parent"
+        <TextView
+            android:id="@+id/selectedConfigInfo"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            app:layout_constraintTop_toBottomOf="@id/title"
-            android:layout_marginTop="24dp"
-            app:cardElevation="4dp"
-            app:cardCornerRadius="8dp">
+            android:text="当前选中: 配置1"
+            android:textSize="14sp"
+            android:textColor="@android:color/white"
+            android:layout_marginTop="4dp"
+            android:visibility="gone"/>
 
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
+    </LinearLayout>
 
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="VPN 状态"
-                    android:textSize="14sp"
-                    android:textColor="?android:textColorSecondary"/>
+    <!-- 状态卡片 -->
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/statusCard"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_margin="16dp"
+        app:cardElevation="4dp"
+        app:cardCornerRadius="8dp">
 
-                <TextView
-                    android:id="@+id/statusText"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="VPN 已停止"
-                    android:textSize="20sp"
-                    android:textStyle="bold"
-                    android:layout_marginTop="4dp"/>
-
-                <TextView
-                    android:id="@+id/statsText"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textSize="12sp"
-                    android:layout_marginTop="8dp"
-                    android:textColor="?android:textColorSecondary"/>
-
-            </LinearLayout>
-
-        </com.google.android.material.card.MaterialCardView>
-
-        <!-- 配置区域 -->
-        <com.google.android.material.card.MaterialCardView
-            android:id="@+id/configCard"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            app:layout_constraintTop_toBottomOf="@id/statusCard"
-            android:layout_marginTop="16dp"
-            app:cardElevation="4dp"
-            app:cardCornerRadius="8dp">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:padding="16dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="服务器配置"
-                    android:textSize="16sp"
-                    android:textStyle="bold"
-                    android:layout_marginBottom="16dp"/>
-
-                <com.google.android.material.textfield.TextInputLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:hint="SNI 主机"
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editSniHost"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:inputType="textUri"/>
-
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <com.google.android.material.textfield.TextInputLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:hint="代理 IP"
-                    android:layout_marginTop="8dp"
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editProxyIp"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:inputType="textUri"/>
-
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <com.google.android.material.textfield.TextInputLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:hint="服务器端口"
-                    android:layout_marginTop="8dp"
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editServerPort"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:inputType="number"/>
-
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <com.google.android.material.textfield.TextInputLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:hint="路径"
-                    android:layout_marginTop="8dp"
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editPath"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:inputType="text"/>
-
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <com.google.android.material.textfield.TextInputLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:hint="预共享密钥 (PSK)"
-                    android:layout_marginTop="8dp"
-                    style="@style/Widget.Material3.TextInputLayout.OutlinedBox">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/editPsk"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:inputType="textPassword"
-                        android:fontFamily="monospace"/>
-
-                </com.google.android.material.textfield.TextInputLayout>
-
-            </LinearLayout>
-
-        </com.google.android.material.card.MaterialCardView>
-
-        <!-- 控制按钮 -->
         <LinearLayout
-            android:id="@+id/buttonLayout"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            app:layout_constraintTop_toBottomOf="@id/configCard"
-            android:layout_marginTop="24dp">
+            android:padding="16dp">
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnStart"
-                android:layout_width="match_parent"
-                android:layout_height="56dp"
-                android:text="启动 VPN"
-                android:textSize="16sp"
-                style="@style/Widget.Material3.Button"/>
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="VPN 状态"
+                android:textSize="14sp"
+                android:textColor="?android:textColorSecondary"/>
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnStop"
+            <TextView
+                android:id="@+id/statusText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="VPN 已停止"
+                android:textSize="20sp"
+                android:textStyle="bold"
+                android:layout_marginTop="4dp"/>
+
+            <TextView
+                android:id="@+id/statsText"
                 android:layout_width="match_parent"
-                android:layout_height="56dp"
-                android:text="停止 VPN"
-                android:textSize="16sp"
-                android:enabled="false"
+                android:layout_height="wrap_content"
+                android:textSize="12sp"
                 android:layout_marginTop="8dp"
-                style="@style/Widget.Material3.Button.TonalButton"/>
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnSave"
-                android:layout_width="match_parent"
-                android:layout_height="56dp"
-                android:text="保存配置"
-                android:textSize="16sp"
-                android:layout_marginTop="8dp"
-                style="@style/Widget.Material3.Button.OutlinedButton"/>
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btnHelp"
-                android:layout_width="match_parent"
-                android:layout_height="56dp"
-                android:text="帮助"
-                android:textSize="16sp"
-                android:layout_marginTop="8dp"
-                style="@style/Widget.Material3.Button.TextButton"/>
+                android:textColor="?android:textColorSecondary"/>
 
         </LinearLayout>
 
-    </androidx.constraintlayout.widget.ConstraintLayout>
+    </com.google.android.material.card.MaterialCardView>
 
-</ScrollView>
+    <!-- 控制按钮 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingBottom="8dp">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnStart"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:text="启动 VPN"
+            android:textSize="16sp"
+            android:layout_marginEnd="8dp"
+            style="@style/Widget.Material3.Button"/>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnStop"
+            android:layout_width="0dp"
+            android:layout_height="56dp"
+            android:layout_weight="1"
+            android:text="停止 VPN"
+            android:textSize="16sp"
+            android:enabled="false"
+            style="@style/Widget.Material3.Button.TonalButton"/>
+
+    </LinearLayout>
+
+    <!-- 配置列表标题栏 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="服务器配置"
+            android:textSize="18sp"
+            android:textStyle="bold"/>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnAddConfig"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="添加配置"
+            style="@style/Widget.Material3.Button.OutlinedButton"
+            app:icon="@android:drawable/ic_input_add"/>
+
+    </LinearLayout>
+
+    <!-- 配置列表 -->
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/recyclerConfigs"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingBottom="8dp"/>
+
+        <!-- 空状态视图 -->
+        <LinearLayout
+            android:id="@+id/emptyView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:padding="32dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="暂无配置"
+                android:textSize="18sp"
+                android:textStyle="bold"
+                android:textColor="?android:textColorSecondary"/>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="点击上方'添加配置'按钮创建新配置"
+            android:textSize="14sp"
+            android:textColor="?android:textColorTertiary"
+            android:layout_marginTop="8dp"
+            android:gravity="center"/>
+
+        </LinearLayout>
+
+    </FrameLayout>
+
+    <!-- 底部按钮 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="16dp"
+        android:elevation="4dp"
+        android:background="?attr/colorSurface">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnHelp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="帮助"
+            style="@style/Widget.Material3.Button.TextButton"
+            app:icon="@android:drawable/ic_menu_help"/>
+
+    </LinearLayout>
+
+</LinearLayout>
