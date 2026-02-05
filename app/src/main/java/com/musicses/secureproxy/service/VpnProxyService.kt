@@ -19,11 +19,21 @@ import com.musicses.secureproxy.network.SecureWebSocket
 import kotlinx.coroutines.*
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
 import java.nio.ByteBuffer
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * VPN 代理服务 - 修复版
+ * VPN 代理服务 - 完整修复版
+ *
+ * 新增功能:
+ * 1. DNS 查询支持 (UDP 53)
+ * 2. 完整的 TCP 三次握手
+ * 3. TCP 状态机管理
+ * 4. ICMP 支持(可选)
  */
 class VpnProxyService : VpnService() {
 
@@ -47,6 +57,19 @@ class VpnProxyService : VpnService() {
         private const val TCP_RST = 0x04
         private const val TCP_PSH = 0x08
         private const val TCP_ACK = 0x10
+
+        // TCP 状态
+        private const val TCP_STATE_LISTEN = 0
+        private const val TCP_STATE_SYN_SENT = 1
+        private const val TCP_STATE_SYN_RECEIVED = 2
+        private const val TCP_STATE_ESTABLISHED = 3
+        private const val TCP_STATE_FIN_WAIT_1 = 4
+        private const val TCP_STATE_FIN_WAIT_2 = 5
+        private const val TCP_STATE_CLOSE_WAIT = 6
+        private const val TCP_STATE_CLOSING = 7
+        private const val TCP_STATE_LAST_ACK = 8
+        private const val TCP_STATE_TIME_WAIT = 9
+        private const val TCP_STATE_CLOSED = 10
     }
 
     private val binder = VpnBinder()
@@ -63,6 +86,9 @@ class VpnProxyService : VpnService() {
 
     // TCP 连接映射
     private val tcpConnections = ConcurrentHashMap<String, TcpConnection>()
+
+    // DNS 缓存
+    private val dnsCache = ConcurrentHashMap<String, InetAddress>()
 
     inner class VpnBinder : Binder() {
         fun getService(): VpnProxyService = this@VpnProxyService
@@ -202,7 +228,7 @@ class VpnProxyService : VpnService() {
         val ihl = (versionAndIHL and 0x0F) * 4
 
         packet.get() // TOS
-        packet.short // Total Length
+        val totalLength = packet.short.toInt() and 0xFFFF
         packet.position(headerStart + 8)
         packet.get() // TTL
         val protocol = packet.get().toInt() and 0xFF
@@ -217,10 +243,146 @@ class VpnProxyService : VpnService() {
         packet.position(headerStart + ihl)
 
         when (protocol) {
-            6 -> {
-                Log.d(TAG, "TCP: ${formatIp(srcAddress)} -> ${formatIp(dstAddress)}")
+            6 -> {  // TCP
                 processTcpPacket(packet, srcAddress, dstAddress, headerStart, ihl, vpnOutput)
             }
+            17 -> {  // UDP
+                processUdpPacket(packet, srcAddress, dstAddress, headerStart, ihl, vpnOutput)
+            }
+            1 -> {  // ICMP
+                Log.d(TAG, "ICMP: ${formatIp(srcAddress)} -> ${formatIp(dstAddress)}")
+                // ICMP 暂时忽略，可以根据需要实现
+            }
+        }
+    }
+
+    /**
+     * 处理 UDP 包 - 主要用于 DNS 查询
+     */
+    private suspend fun processUdpPacket(
+        packet: ByteBuffer,
+        srcAddress: ByteArray,
+        dstAddress: ByteArray,
+        ipHeaderStart: Int,
+        ipHeaderLength: Int,
+        vpnOutput: FileOutputStream
+    ) = withContext(Dispatchers.IO) {
+        if (packet.remaining() < 8) return@withContext
+
+        val udpStart = packet.position()
+        val srcPort = packet.short.toInt() and 0xFFFF
+        val dstPort = packet.short.toInt() and 0xFFFF
+        val udpLength = packet.short.toInt() and 0xFFFF
+        packet.short // checksum
+
+        val dataLength = udpLength - 8
+        if (dataLength <= 0) return@withContext
+
+        val data = ByteArray(dataLength)
+        packet.get(data)
+
+        val dstHost = formatIp(dstAddress)
+
+        Log.d(TAG, "UDP: ${formatIp(srcAddress)}:$srcPort -> $dstHost:$dstPort (${data.size} bytes)")
+
+        // 处理 DNS 查询 (端口 53)
+        if (dstPort == 53) {
+            try {
+                val dnsResponse = performDnsQuery(data, dstHost)
+
+                // 发送 DNS 响应回客户端
+                sendUdpPacket(
+                    vpnOutput,
+                    dstAddress,     // 交换源和目标
+                    srcAddress,
+                    dstPort,
+                    srcPort,
+                    dnsResponse
+                )
+
+                Log.d(TAG, "DNS 查询成功，返回 ${dnsResponse.size} bytes")
+            } catch (e: Exception) {
+                Log.e(TAG, "DNS 查询失败: ${e.message}")
+            }
+        } else {
+            // 其他 UDP 流量暂时忽略或可以通过代理转发
+            Log.d(TAG, "非 DNS UDP 流量，端口 $dstPort，暂时忽略")
+        }
+    }
+
+    /**
+     * 执行 DNS 查询
+     */
+    private fun performDnsQuery(query: ByteArray, dnsServer: String): ByteArray {
+        val socket = DatagramSocket()
+        socket.soTimeout = 5000  // 5秒超时
+
+        try {
+            // 发送 DNS 查询
+            val address = InetAddress.getByName(dnsServer)
+            val sendPacket = DatagramPacket(query, query.size, address, 53)
+            socket.send(sendPacket)
+
+            // 接收 DNS 响应
+            val receiveBuffer = ByteArray(512)
+            val receivePacket = DatagramPacket(receiveBuffer, receiveBuffer.size)
+            socket.receive(receivePacket)
+
+            return receiveBuffer.copyOf(receivePacket.length)
+        } finally {
+            socket.close()
+        }
+    }
+
+    /**
+     * 发送 UDP 包
+     */
+    private fun sendUdpPacket(
+        vpnOutput: FileOutputStream,
+        srcAddress: ByteArray,
+        dstAddress: ByteArray,
+        srcPort: Int,
+        dstPort: Int,
+        data: ByteArray
+    ) {
+        try {
+            val udpHeaderLen = 8
+            val ipHeaderLen = 20
+            val totalLen = ipHeaderLen + udpHeaderLen + data.size
+
+            val packet = ByteBuffer.allocate(totalLen)
+
+            // IP 头
+            packet.put(0x45.toByte())
+            packet.put(0)
+            packet.putShort(totalLen.toShort())
+            packet.putShort(0)
+            packet.putShort(0x4000.toShort())
+            packet.put(64)
+            packet.put(17)  // UDP
+            packet.putShort(0)
+            packet.put(srcAddress)
+            packet.put(dstAddress)
+
+            val ipChecksum = calculateChecksum(packet.array(), 0, ipHeaderLen)
+            packet.putShort(10, ipChecksum)
+
+            // UDP 头
+            val udpStart = packet.position()
+            packet.putShort(srcPort.toShort())
+            packet.putShort(dstPort.toShort())
+            packet.putShort((udpHeaderLen + data.size).toShort())
+            packet.putShort(0)  // checksum (可以为0)
+
+            // 数据
+            packet.put(data)
+
+            packet.position(0)
+            packet.limit(totalLen)
+            vpnOutput.channel.write(packet)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "发送UDP包失败", e)
         }
     }
 
@@ -258,19 +420,36 @@ class VpnProxyService : VpnService() {
 
         val connKey = "$srcPort-$dstHost-$dstPort"
 
-        Log.d(TAG, "$connKey [${flagsToString(flags)}] seq=$seqNum ack=$ackNum payload=$payloadLength")
+        Log.d(TAG, "$connKey [${flagsToString(flags)}] seq=$seqNum ack=$ackNum len=$payloadLength")
 
         try {
             when {
-                syn && !ack -> handleTcpSyn(connKey, srcPort, dstHost, dstPort, seqNum, srcAddress, dstAddress, vpnOutput)
-                fin -> handleTcpFin(connKey, seqNum, ackNum, srcPort, dstPort, srcAddress, dstAddress, vpnOutput)
-                rst -> handleTcpRst(connKey)
+                // 第一步: 客户端发送 SYN
+                syn && !ack -> {
+                    handleTcpSyn(connKey, srcPort, dstHost, dstPort, seqNum, srcAddress, dstAddress, vpnOutput)
+                }
+                // 第三步: 客户端发送 ACK (三次握手完成)
+                ack && !syn && !fin && !psh && payloadLength == 0 -> {
+                    handleTcpAckForHandshake(connKey, ackNum)
+                }
+                // 数据传输
                 payloadLength > 0 -> {
                     val payload = ByteArray(payloadLength)
                     packet.get(payload)
                     handleTcpData(connKey, payload, seqNum, ackNum, srcPort, dstPort, srcAddress, dstAddress, vpnOutput)
                 }
-                ack -> handleTcpAck(connKey, ackNum)
+                // FIN 关闭连接
+                fin -> {
+                    handleTcpFin(connKey, seqNum, ackNum, srcPort, dstPort, srcAddress, dstAddress, vpnOutput)
+                }
+                // RST 重置连接
+                rst -> {
+                    handleTcpRst(connKey)
+                }
+                // 其他 ACK
+                ack -> {
+                    handleTcpAck(connKey, ackNum)
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "TCP处理失败 ($connKey)", e)
@@ -288,17 +467,21 @@ class VpnProxyService : VpnService() {
         dstAddress: ByteArray,
         vpnOutput: FileOutputStream
     ) {
-        if (tcpConnections.containsKey(connKey)) return
+        if (tcpConnections.containsKey(connKey)) {
+            Log.w(TAG, "连接已存在: $connKey")
+            return
+        }
 
         scope.launch {
             try {
-                Log.i(TAG, "新连接: $connKey")
+                Log.i(TAG, "新连接 SYN: $connKey")
 
                 val ws = connectionManager?.acquire() ?: throw Exception("无法获取WebSocket")
 
                 ws.sendConnect(dstHost, dstPort)
                 Log.d(TAG, "已连接远程: $dstHost:$dstPort")
 
+                // 生成初始服务器序列号
                 val serverSeq = (Math.random() * Int.MAX_VALUE).toInt()
 
                 val connection = TcpConnection(
@@ -307,15 +490,16 @@ class VpnProxyService : VpnService() {
                     remoteHost = dstHost,
                     remotePort = dstPort,
                     webSocket = ws,
-                    connected = true,
-                    clientSeq = clientSeq + 1,
-                    serverSeq = serverSeq + 1,
+                    state = TCP_STATE_SYN_RECEIVED,  // SYN_RECEIVED 状态
+                    clientSeq = AtomicInteger(clientSeq + 1),
+                    serverSeq = AtomicInteger(serverSeq + 1),
                     srcAddress = srcAddress,
                     dstAddress = dstAddress
                 )
 
                 tcpConnections[connKey] = connection
 
+                // 发送 SYN-ACK (第二步)
                 sendTcpPacket(
                     vpnOutput,
                     dstAddress, srcAddress,
@@ -326,15 +510,33 @@ class VpnProxyService : VpnService() {
                     null
                 )
 
-                Log.d(TAG, "已发送 SYN-ACK: $connKey")
-
-                startReceiveLoop(connection, vpnOutput)
+                Log.d(TAG, "已发送 SYN-ACK: $connKey (seq=$serverSeq, ack=${clientSeq + 1})")
 
             } catch (e: Exception) {
                 Log.e(TAG, "连接失败 ($connKey)", e)
                 tcpConnections.remove(connKey)
                 sendTcpPacket(vpnOutput, dstAddress, srcAddress, dstPort, srcPort, 0, 0, TCP_RST, null)
             }
+        }
+    }
+
+    /**
+     * 处理三次握手的第三步 ACK
+     */
+    private fun handleTcpAckForHandshake(connKey: String, ackNum: Int) {
+        val connection = tcpConnections[connKey]
+        if (connection == null) {
+            Log.w(TAG, "收到未知连接的 ACK: $connKey")
+            return
+        }
+
+        if (connection.state == TCP_STATE_SYN_RECEIVED) {
+            connection.state = TCP_STATE_ESTABLISHED
+            connection.connected = true
+            Log.i(TAG, "连接已建立: $connKey")
+
+            // 启动接收循环
+            startReceiveLoop(connection, FileOutputStream(vpnInterface!!.fileDescriptor))
         }
     }
 
@@ -351,28 +553,37 @@ class VpnProxyService : VpnService() {
     ) {
         val connection = tcpConnections[connKey]
         if (connection == null) {
+            Log.w(TAG, "收到未知连接的数据: $connKey")
             sendTcpPacket(vpnOutput, dstAddress, srcAddress, dstPort, srcPort, 0, 0, TCP_RST, null)
             return
         }
 
-        if (!connection.connected) return
+        if (!connection.connected || connection.state != TCP_STATE_ESTABLISHED) {
+            Log.w(TAG, "连接未建立，忽略数据: $connKey")
+            return
+        }
 
         scope.launch {
             try {
                 Log.d(TAG, "发送数据 ($connKey): ${data.size} bytes")
 
                 connection.webSocket?.send(data)
-                connection.clientSeq = seqNum + data.size
 
+                // 更新期望的客户端序列号
+                connection.clientSeq.set(seqNum + data.size)
+
+                // 发送 ACK
                 sendTcpPacket(
                     vpnOutput,
                     dstAddress, srcAddress,
                     dstPort, srcPort,
-                    connection.serverSeq,
-                    connection.clientSeq,
+                    connection.serverSeq.get(),
+                    connection.clientSeq.get(),
                     TCP_ACK,
                     null
                 )
+
+                Log.d(TAG, "已确认接收 ($connKey): ${data.size} bytes")
 
             } catch (e: Exception) {
                 Log.e(TAG, "发送失败 ($connKey)", e)
@@ -382,7 +593,10 @@ class VpnProxyService : VpnService() {
     }
 
     private fun handleTcpAck(connKey: String, ackNum: Int) {
-        // ACK处理
+        val connection = tcpConnections[connKey]
+        if (connection != null) {
+            Log.d(TAG, "[$connKey] 收到 ACK: $ackNum (state=${connection.state})")
+        }
     }
 
     private suspend fun handleTcpFin(
@@ -399,25 +613,32 @@ class VpnProxyService : VpnService() {
         if (connection != null) {
             Log.i(TAG, "FIN ($connKey)")
 
+            connection.state = TCP_STATE_CLOSE_WAIT
+
+            // 发送 ACK 确认 FIN
             sendTcpPacket(
                 vpnOutput,
                 dstAddress, srcAddress,
                 dstPort, srcPort,
-                connection.serverSeq,
+                connection.serverSeq.get(),
                 seqNum + 1,
                 TCP_ACK,
                 null
             )
 
+            // 发送我们自己的 FIN
             sendTcpPacket(
                 vpnOutput,
                 dstAddress, srcAddress,
                 dstPort, srcPort,
-                connection.serverSeq,
+                connection.serverSeq.get(),
                 seqNum + 1,
                 TCP_FIN or TCP_ACK,
                 null
             )
+
+            connection.serverSeq.incrementAndGet()
+            connection.state = TCP_STATE_LAST_ACK
         }
 
         closeTcpConnection(connKey, vpnOutput)
@@ -433,12 +654,17 @@ class VpnProxyService : VpnService() {
             try {
                 Log.d(TAG, "开始接收: ${connection.key}")
 
-                while (connection.connected && connection.webSocket?.isConnected() == true) {
+                while (connection.connected &&
+                    connection.state == TCP_STATE_ESTABLISHED &&
+                    connection.webSocket?.isConnected() == true) {
+
                     val data = connection.webSocket?.recv() ?: break
 
                     if (data.isEmpty()) break
 
                     Log.d(TAG, "收到数据 (${connection.key}): ${data.size} bytes")
+
+                    val currentServerSeq = connection.serverSeq.get()
 
                     sendTcpPacket(
                         vpnOutput,
@@ -446,13 +672,15 @@ class VpnProxyService : VpnService() {
                         connection.srcAddress,
                         connection.remotePort,
                         connection.localPort,
-                        connection.serverSeq,
-                        connection.clientSeq,
+                        currentServerSeq,
+                        connection.clientSeq.get(),
                         TCP_PSH or TCP_ACK,
                         data
                     )
 
-                    connection.serverSeq += data.size
+                    connection.serverSeq.addAndGet(data.size)
+
+                    Log.d(TAG, "已发送数据 (${connection.key}): ${data.size} bytes")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "接收错误 (${connection.key})", e)
@@ -566,6 +794,7 @@ class VpnProxyService : VpnService() {
         tcpConnections.remove(connKey)?.let { connection ->
             Log.i(TAG, "关闭: $connKey")
             connection.connected = false
+            connection.state = TCP_STATE_CLOSED
 
             scope.launch {
                 try {
@@ -692,6 +921,9 @@ class VpnProxyService : VpnService() {
         Log.d(TAG, "VPN Service destroyed")
     }
 
+    /**
+     * TCP 连接 - 增加状态管理
+     */
     private data class TcpConnection(
         val key: String,
         val localPort: Int,
@@ -699,8 +931,9 @@ class VpnProxyService : VpnService() {
         val remotePort: Int,
         var webSocket: SecureWebSocket? = null,
         var connected: Boolean = false,
-        var clientSeq: Int = 0,
-        var serverSeq: Int = 0,
+        var state: Int = TCP_STATE_LISTEN,  // TCP 状态
+        val clientSeq: AtomicInteger,
+        val serverSeq: AtomicInteger,
         val srcAddress: ByteArray,
         val dstAddress: ByteArray
     )

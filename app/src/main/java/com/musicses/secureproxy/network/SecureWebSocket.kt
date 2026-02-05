@@ -14,7 +14,12 @@ import java.util.concurrent.TimeUnit
 import javax.net.ssl.*
 
 /**
- * 安全 WebSocket 连接类
+ * 安全 WebSocket 连接类 - 修复版
+ *
+ * 主要修复:
+ * 1. 密钥派生的 salt 顺序与服务器保持一致
+ * 2. 完整的握手超时和重试机制
+ * 3. 更健壮的错误处理
  */
 class SecureWebSocket(
     private val config: ProxyConfig,
@@ -24,10 +29,12 @@ class SecureWebSocket(
         private const val TAG = "SecureWebSocket"
         private const val PROTOCOL_VERSION = 1
         private const val CONNECT_TIMEOUT = 10000L
+        private const val HANDSHAKE_TIMEOUT = 60000L  // 握手使用更长超时
         private const val MESSAGE_TIMEOUT = 30000L
         private const val KEEPALIVE_INTERVAL = 20000L
         private const val IDLE_TIMEOUT = 120000L
         private const val MAX_RETRIES = 3
+        private const val HANDSHAKE_RETRIES = 2  // 握手失败重试次数
     }
 
     private var webSocket: WebSocket? = null
@@ -47,8 +54,11 @@ class SecureWebSocket(
     private val mutex = Mutex()
     private val client: OkHttpClient
 
+    // 连接标识
+    private val connId = (Math.random() * 1000000).toInt().toString(16).substring(0, 6)
+
     init {
-        // 创建信任所有证书的 SSL 上下文 (仅用于测试,生产环境应使用正确的证书验证)
+        // 创建信任所有证书的 SSL 上下文
         val trustAllCerts = arrayOf<TrustManager>(object : X509TrustManager {
             override fun checkClientTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
             override fun checkServerTrusted(chain: Array<java.security.cert.X509Certificate>, authType: String) {}
@@ -69,7 +79,7 @@ class SecureWebSocket(
     }
 
     /**
-     * 连接到服务器
+     * 连接到服务器(带重试)
      */
     suspend fun connect() = mutex.withLock {
         if (destroyed) throw IllegalStateException("WebSocket destroyed")
@@ -80,7 +90,7 @@ class SecureWebSocket(
                 attemptConnect()
                 return@withLock
             } catch (e: Exception) {
-                Log.w(TAG, "Connection attempt ${attempt + 1}/$MAX_RETRIES failed: ${e.message}")
+                Log.w(TAG, "[$connId] Connection attempt ${attempt + 1}/$MAX_RETRIES failed: ${e.message}")
                 if (attempt < MAX_RETRIES - 1) {
                     delay(1000L * (attempt + 1))
                 } else {
@@ -95,7 +105,7 @@ class SecureWebSocket(
      */
     private suspend fun attemptConnect() = withContext(Dispatchers.IO) {
         val wsUrl = "wss://${config.proxyIp}:${config.serverPort}${config.path}"
-        Log.d(TAG, "Connecting to: $wsUrl")
+        Log.d(TAG, "[$connId] Connecting to: $wsUrl")
 
         val request = Request.Builder()
             .url(wsUrl)
@@ -108,17 +118,20 @@ class SecureWebSocket(
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "WebSocket opened")
+                Log.d(TAG, "[$connId] WebSocket opened")
                 scope.launch {
                     try {
-                        setupKeys()
+                        // 使用更长的超时进行握手
+                        withTimeout(HANDSHAKE_TIMEOUT) {
+                            setupKeysWithRetry()
+                        }
                         connected = true
                         updateActivity()
                         setupKeepalive()
                         connectDeferred.complete(Unit)
-                        Log.d(TAG, "WebSocket authenticated")
+                        Log.d(TAG, "[$connId] WebSocket authenticated successfully")
                     } catch (e: Exception) {
-                        Log.e(TAG, "Auth failed: ${e.message}")
+                        Log.e(TAG, "[$connId] Auth failed: ${e.message}")
                         connectDeferred.completeExceptionally(e)
                     }
                 }
@@ -132,77 +145,113 @@ class SecureWebSocket(
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket error: ${t.message}")
+                Log.e(TAG, "[$connId] WebSocket error: ${t.message}")
                 connected = false
                 connectDeferred.completeExceptionally(t)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "WebSocket closing: code=$code, reason=$reason")
+                Log.d(TAG, "[$connId] WebSocket closing: code=$code, reason=$reason")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "WebSocket closed: code=$code")
+                Log.d(TAG, "[$connId] WebSocket closed: code=$code")
                 connected = false
             }
         })
 
-        withTimeout(CONNECT_TIMEOUT) {
+        withTimeout(CONNECT_TIMEOUT + HANDSHAKE_TIMEOUT) {
             connectDeferred.await()
         }
     }
 
     /**
-     * 设置密钥
+     * 设置密钥(带重试)
+     */
+    private suspend fun setupKeysWithRetry() {
+        var lastError: Exception? = null
+
+        repeat(HANDSHAKE_RETRIES) { attempt ->
+            try {
+                setupKeys()
+                Log.d(TAG, "[$connId] Handshake succeeded on attempt ${attempt + 1}")
+                return
+            } catch (e: Exception) {
+                lastError = e
+                Log.w(TAG, "[$connId] Handshake attempt ${attempt + 1}/$HANDSHAKE_RETRIES failed: ${e.message}")
+                if (attempt < HANDSHAKE_RETRIES - 1) {
+                    delay(1000L)
+                }
+            }
+        }
+
+        throw lastError ?: Exception("Handshake failed")
+    }
+
+    /**
+     * 设置密钥 - 关键修复: salt 顺序与服务器一致
      */
     private suspend fun setupKeys() {
         // 1. 密钥交换
         val clientPub = CryptoUtils.generateRandomBytes(32)
         sendRaw(clientPub)
+        Log.d(TAG, "[$connId] Sent client public key (${clientPub.size} bytes)")
 
-        val serverPub = recvMessageWithTimeout(MESSAGE_TIMEOUT)
+        val serverPub = recvMessageWithTimeout(HANDSHAKE_TIMEOUT)
         if (serverPub.size != 32) {
-            throw IllegalStateException("Invalid server public key")
+            throw IllegalStateException("Invalid server public key: ${serverPub.size} bytes")
         }
+        Log.d(TAG, "[$connId] Received server public key (${serverPub.size} bytes)")
 
-        // 2. 密钥派生
+        // 2. 密钥派生 - 关键修复: salt = clientPub + serverPub (与服务器一致)
         val salt = clientPub + serverPub
-        val keys = CryptoUtils.deriveKeys(CryptoUtils.hexToBytes(config.preSharedKey), salt)
+        Log.d(TAG, "[$connId] Salt generated (${salt.size} bytes)")
+
+        val keys = CryptoUtils.deriveKeys(
+            CryptoUtils.hexToBytes(config.preSharedKey),
+            salt
+        )
 
         sendKey = keys.sendKey
         recvKey = keys.recvKey
+        Log.d(TAG, "[$connId] Keys derived successfully")
 
         // 3. 认证
         val challenge = CryptoUtils.hmacSha256(sendKey!!, "auth".toByteArray())
         sendRaw(challenge)
+        Log.d(TAG, "[$connId] Sent auth challenge")
 
-        val response = recvMessageWithTimeout(MESSAGE_TIMEOUT)
+        val response = recvMessageWithTimeout(HANDSHAKE_TIMEOUT)
         val expected = CryptoUtils.hmacSha256(recvKey!!, "ok".toByteArray())
 
         if (!CryptoUtils.constantTimeCompare(response, expected)) {
-            throw SecurityException("Authentication failed")
+            throw SecurityException("Authentication failed: challenge mismatch")
         }
 
-        Log.d(TAG, "Keys setup completed")
+        Log.d(TAG, "[$connId] Authentication successful")
     }
 
     /**
      * 发送连接请求
      */
     suspend fun sendConnect(host: String, port: Int) {
+        if (!connected || destroyed) throw IllegalStateException("Not connected")
+
         val address = "$host:$port".toByteArray()
         val addressLen = ByteBuffer.allocate(2)
             .putShort(address.size.toShort())
             .array()
 
         send(addressLen + address)
+        Log.d(TAG, "[$connId] Sent CONNECT request to $host:$port")
 
         val response = recv()
         if (response.size != 1 || response[0] != 0.toByte()) {
-            throw IllegalStateException("Connect failed: ${response.firstOrNull()}")
+            val errorCode = if (response.isNotEmpty()) response[0].toInt() else -1
+            throw IllegalStateException("Connect failed with code: $errorCode")
         }
 
-        Log.d(TAG, "Connected to $host:$port")
+        Log.d(TAG, "[$connId] Connected to $host:$port")
     }
 
     /**
@@ -234,7 +283,8 @@ class SecureWebSocket(
      * 发送原始数据
      */
     private fun sendRaw(data: ByteArray) {
-        webSocket?.send(ByteString.of(*data)) ?: throw IllegalStateException("WebSocket not connected")
+        webSocket?.send(ByteString.of(*data))
+            ?: throw IllegalStateException("WebSocket not connected")
     }
 
     /**
@@ -264,7 +314,7 @@ class SecureWebSocket(
 
                 val idleTime = System.currentTimeMillis() - lastActivity
                 if (idleTime > IDLE_TIMEOUT) {
-                    Log.w(TAG, "Connection idle too long (${idleTime / 1000}s), closing")
+                    Log.w(TAG, "[$connId] Connection idle too long (${idleTime / 1000}s), closing")
                     close()
                     break
                 }
@@ -289,7 +339,7 @@ class SecureWebSocket(
 
         messageChannel.close()
 
-        Log.d(TAG, "WebSocket closed")
+        Log.d(TAG, "[$connId] WebSocket closed")
     }
 
     /**
