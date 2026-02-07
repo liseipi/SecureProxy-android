@@ -19,7 +19,11 @@ import com.secureproxy.android.ui.MainActivity
 import kotlinx.coroutines.*
 
 /**
- * 代理 VPN 服务
+ * 代理 VPN 服务 - 修复版
+ * 关键修复:
+ * 1. 在主线程建立 VPN 接口 (不能在协程中)
+ * 2. 添加详细错误日志
+ * 3. 简化启动流程
  */
 class ProxyVpnService : VpnService() {
 
@@ -39,6 +43,7 @@ class ProxyVpnService : VpnService() {
 
     private val binder = VpnServiceBinder()
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     private var config: ProxyConfig? = null
     private var vpnInterface: ParcelFileDescriptor? = null
 
@@ -57,119 +62,151 @@ class ProxyVpnService : VpnService() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d(TAG, "onStartCommand: ${intent?.action}")
-
-        // 为了防止 ForegroundServiceDidNotStartInTimeException，
-        // 必须在 onStartCommand 中尽快调用 startForeground。
-        // 对于 Android 14+ (Target SDK 34+)，必须指定 foregroundServiceType。
-        val initialNotification = createInitialNotification()
-        
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceCompat.startForeground(
-                    this,
-                    NOTIFICATION_ID,
-                    initialNotification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                )
-            } else {
-                startForeground(NOTIFICATION_ID, initialNotification)
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start foreground service", e)
-        }
+        Log.d(TAG, "onStartCommand: action=${intent?.action}")
 
         when (intent?.action) {
             ACTION_START -> {
+                // 1. 立即启动前台服务
+                startForegroundService()
+
+                // 2. 解析配置
                 val configUrl = intent.getStringExtra(EXTRA_CONFIG)
                 config = configUrl?.let { ProxyConfig.fromUrl(it) }
 
-                if (config != null) {
-                    startProxy(config!!)
+                if (config == null) {
+                    Log.e(TAG, "❌ Invalid config URL: $configUrl")
+                    stopSelf()
+                    return START_NOT_STICKY
+                }
+
+                Log.d(TAG, "✅ Config loaded: ${config!!.name}")
+
+                // 3. 建立 VPN (必须在主线程,不能在协程!)
+                val success = establishVpn(config!!)
+
+                if (success) {
+                    Log.d(TAG, "✅✅✅ VPN ESTABLISHED SUCCESSFULLY ✅✅✅")
+                    updateNotification(config!!)
                 } else {
-                    Log.e(TAG, "Invalid config, stopping service")
+                    Log.e(TAG, "❌❌❌ VPN ESTABLISH FAILED ❌❌❌")
                     stopSelf()
                 }
             }
+
             ACTION_STOP -> {
-                stopProxy()
+                Log.d(TAG, "Stopping VPN service")
+                stopVpn()
             }
         }
 
         return START_STICKY
     }
 
-    private fun startProxy(config: ProxyConfig) {
+    /**
+     * 启动前台服务
+     */
+    private fun startForegroundService() {
+        val notification = createNotification("正在启动...")
+
         try {
-            Log.d(TAG, "Starting proxy for ${config.name}")
-
-            // 更新通知内容为具体的配置信息
-            val notification = createNotification(config)
-            val notificationManager = getSystemService(NotificationManager::class.java)
-            notificationManager?.notify(NOTIFICATION_ID, notification)
-            Log.d(TAG, "Foreground service updated with config")
-
-            // 然后再建立 VPN 连接
-            scope.launch {
-                try {
-                    establishVpnConnection(config)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to establish VPN", e)
-                    stopProxy()
-                }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ServiceCompat.startForeground(
+                    this,
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
             }
-
+            Log.d(TAG, "✅ Foreground service started")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start proxy", e)
-            stopSelf()
+            Log.e(TAG, "❌ Failed to start foreground", e)
         }
     }
 
-    private fun establishVpnConnection(config: ProxyConfig) {
-        Log.d(TAG, "Establishing VPN connection...")
+    /**
+     * 建立 VPN 连接 - 同步执行
+     */
+    private fun establishVpn(config: ProxyConfig): Boolean {
+        Log.d(TAG, "🔧 Establishing VPN for ${config.name}...")
 
         try {
-            // 创建 VPN 接口
+            // 创建 Builder
             val builder = Builder()
-                .setSession(config.name)
-                .addAddress("10.0.0.2", 24)
-                .addRoute("0.0.0.0", 0)
-                .addDnsServer("8.8.8.8")
-                .addDnsServer("8.8.4.4")
-                .setMtu(1500)
-                .setBlocking(false)
 
+            Log.d(TAG, "  → Setting session: ${config.name}")
+            builder.setSession(config.name)
+
+            Log.d(TAG, "  → Adding address: 10.0.0.2/24")
+            builder.addAddress("10.0.0.2", 24)
+
+            Log.d(TAG, "  → Adding route: 0.0.0.0/0")
+            builder.addRoute("0.0.0.0", 0)
+
+            Log.d(TAG, "  → Adding DNS: 8.8.8.8, 8.8.4.4")
+            builder.addDnsServer("8.8.8.8")
+            builder.addDnsServer("8.8.4.4")
+
+            Log.d(TAG, "  → Setting MTU: 1500")
+            builder.setMtu(1500)
+
+            // 🔥 关键: 非阻塞模式
+            Log.d(TAG, "  → Setting blocking: false")
+            builder.setBlocking(false)
+
+            // 🔥🔥 最关键的调用
+            Log.d(TAG, "  → Calling builder.establish()...")
             vpnInterface = builder.establish()
 
-            if (vpnInterface != null) {
-                Log.d(TAG, "VPN interface established")
-
-                // TODO: 启动数据包转发
-                // 这里需要实现：
-                // 1. 从 TUN 接口读取数据包
-                // 2. 解析 TCP/UDP 协议
-                // 3. 通过 WebSocket 转发到远程服务器
-                // 4. 将返回数据写回 TUN 接口
-
-            } else {
-                Log.e(TAG, "Failed to establish VPN interface")
-                stopProxy()
+            if (vpnInterface == null) {
+                Log.e(TAG, "❌ builder.establish() returned NULL!")
+                Log.e(TAG, "   Possible reasons:")
+                Log.e(TAG, "   1. VPN permission was revoked")
+                Log.e(TAG, "   2. Another VPN is already active")
+                Log.e(TAG, "   3. System rejected the VPN configuration")
+                return false
             }
 
+            val fd = vpnInterface!!.fileDescriptor
+            Log.d(TAG, "✅ VPN interface established! FD: $fd")
+            Log.d(TAG, "✅ VPN is now ACTIVE - system VPN icon should appear")
+
+            return true
+
+        } catch (e: SecurityException) {
+            Log.e(TAG, "❌ SecurityException: VPN permission denied!", e)
+            Log.e(TAG, "   → User may have denied VPN permission dialog")
+            return false
+
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "❌ IllegalArgumentException: Invalid VPN config!", e)
+            Log.e(TAG, "   → Check IP address, routes, DNS settings")
+            return false
+
+        } catch (e: IllegalStateException) {
+            Log.e(TAG, "❌ IllegalStateException: VPN service in bad state!", e)
+            Log.e(TAG, "   → Another VPN might be active")
+            return false
+
         } catch (e: Exception) {
-            Log.e(TAG, "Error establishing VPN", e)
-            stopProxy()
+            Log.e(TAG, "❌ Unexpected error establishing VPN", e)
+            return false
         }
     }
 
-    private fun stopProxy() {
-        Log.d(TAG, "Stopping proxy")
+    /**
+     * 停止 VPN
+     */
+    private fun stopVpn() {
+        Log.d(TAG, "🛑 Stopping VPN...")
 
         try {
             vpnInterface?.close()
             vpnInterface = null
+            Log.d(TAG, "✅ VPN interface closed")
         } catch (e: Exception) {
-            Log.e(TAG, "Error closing VPN interface", e)
+            Log.e(TAG, "❌ Error closing VPN interface", e)
         }
 
         scope.cancel()
@@ -182,6 +219,16 @@ class ProxyVpnService : VpnService() {
         }
 
         stopSelf()
+        Log.d(TAG, "✅ Service stopped")
+    }
+
+    /**
+     * 更新通知
+     */
+    private fun updateNotification(config: ProxyConfig) {
+        val notification = createNotification("${config.name} - 已连接")
+        val notificationManager = getSystemService(NotificationManager::class.java)
+        notificationManager?.notify(NOTIFICATION_ID, notification)
     }
 
     private fun createNotificationChannel() {
@@ -200,7 +247,7 @@ class ProxyVpnService : VpnService() {
         }
     }
 
-    private fun createInitialNotification(): Notification {
+    private fun createNotification(text: String): Notification {
         val intent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
@@ -214,30 +261,7 @@ class ProxyVpnService : VpnService() {
 
         return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setContentTitle("SecureProxy")
-            .setContentText("正在启动服务...")
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentIntent(pendingIntent)
-            .setOngoing(true)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .build()
-    }
-
-    private fun createNotification(config: ProxyConfig): Notification {
-        val intent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-        }
-
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        return NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
-            .setContentTitle("SecureProxy 运行中")
-            .setContentText("${config.name} - ${config.sniHost}")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pendingIntent)
             .setOngoing(true)
@@ -247,14 +271,14 @@ class ProxyVpnService : VpnService() {
     }
 
     override fun onRevoke() {
-        Log.d(TAG, "VPN permission revoked")
-        stopProxy()
+        Log.w(TAG, "⚠️ VPN permission revoked by user!")
+        stopVpn()
         super.onRevoke()
     }
 
     override fun onDestroy() {
         Log.d(TAG, "Service onDestroy")
-        stopProxy()
+        stopVpn()
         super.onDestroy()
     }
 }
