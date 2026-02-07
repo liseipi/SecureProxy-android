@@ -19,13 +19,13 @@ import kotlinx.coroutines.launch
  * 代理管理 ViewModel（增强版）
  */
 class ProxyViewModel(application: Application) : AndroidViewModel(application) {
-    
+
     private val repository = ConfigRepository(application)
-    
+
     // 配置列表
     val configs: StateFlow<List<ProxyConfig>> = repository.getConfigsFlow()
         .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
-    
+
     // 活跃配置
     val activeConfig: StateFlow<ProxyConfig?> = combine(
         configs,
@@ -33,40 +33,44 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
     ) { configList, activeId ->
         configList.firstOrNull { it.id == activeId }
     }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
-    
+
     // 代理状态
     private val _status = MutableStateFlow(ProxyStatus.DISCONNECTED)
     val status: StateFlow<ProxyStatus> = _status.asStateFlow()
-    
+
     // 运行状态
     private val _isRunning = MutableStateFlow(false)
     val isRunning: StateFlow<Boolean> = _isRunning.asStateFlow()
-    
+
     // 流量统计
     private val _trafficStats = MutableStateFlow(TrafficStats())
     val trafficStats: StateFlow<TrafficStats> = _trafficStats.asStateFlow()
-    
+
     // 日志
     private val _logs = MutableStateFlow<List<String>>(emptyList())
     val logs: StateFlow<List<String>> = _logs.asStateFlow()
-    
+
+    // VPN 权限请求
+    private val _vpnPermissionNeeded = MutableStateFlow<Intent?>(null)
+    val vpnPermissionNeeded: StateFlow<Intent?> = _vpnPermissionNeeded.asStateFlow()
+
     // VPN 服务连接
     private var vpnServiceBinder: ProxyVpnService.VpnServiceBinder? = null
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             // 可以用于获取服务实例和流量统计
         }
-        
+
         override fun onServiceDisconnected(name: ComponentName?) {
             vpnServiceBinder = null
         }
     }
-    
+
     init {
         // 启动流量统计模拟（实际应该从 VPN 服务获取）
         startTrafficMonitoring()
     }
-    
+
     /**
      * 启动流量监控
      */
@@ -86,7 +90,7 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-    
+
     /**
      * 添加日志
      */
@@ -100,7 +104,7 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
         }
         _logs.value = logs
     }
-    
+
     /**
      * 清除日志
      */
@@ -108,7 +112,7 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
         _logs.value = emptyList()
         addLog("🗑️ 日志已清除")
     }
-    
+
     /**
      * 保存配置
      */
@@ -124,7 +128,7 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-    
+
     /**
      * 删除配置
      */
@@ -134,7 +138,7 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
             addLog("🗑️ 删除配置: ${config.name}")
         }
     }
-    
+
     /**
      * 切换活跃配置
      */
@@ -142,7 +146,7 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.setActiveConfig(config.id)
             addLog("🔄 切换到: ${config.name}")
-            
+
             // 如果正在运行，重启代理
             if (_isRunning.value) {
                 addLog("⚠️ 重启代理...")
@@ -152,7 +156,7 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
     }
-    
+
     /**
      * 启动代理
      */
@@ -162,24 +166,63 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
             addLog("❌ 未选择配置")
             return
         }
-        
+
         if (_isRunning.value) {
             addLog("⚠️ 代理已在运行")
             return
         }
-        
+
+        val context = getApplication<Application>()
+
+        // 检查 VPN 权限
+        val prepareIntent = android.net.VpnService.prepare(context)
+        if (prepareIntent != null) {
+            // 需要请求权限
+            _vpnPermissionNeeded.value = prepareIntent
+            addLog("📋 请求 VPN 权限...")
+            return
+        }
+
+        // 已有权限,直接启动
+        startVpnService(config)
+    }
+
+    /**
+     * VPN 权限已授予后调用
+     */
+    fun onVpnPermissionGranted() {
+        _vpnPermissionNeeded.value = null
+        val config = activeConfig.value
+        if (config != null) {
+            startVpnService(config)
+        }
+    }
+
+    /**
+     * VPN 权限被拒绝
+     */
+    fun onVpnPermissionDenied() {
+        _vpnPermissionNeeded.value = null
+        addLog("❌ VPN 权限被拒绝")
+        _status.value = ProxyStatus.DISCONNECTED
+    }
+
+    /**
+     * 实际启动 VPN 服务
+     */
+    private fun startVpnService(config: ProxyConfig) {
         val context = getApplication<Application>()
         _status.value = ProxyStatus.CONNECTING
-        
+
         val cdnMode = if (config.isCdnMode) " (CDN)" else ""
         addLog("🚀 启动: ${config.sniHost}$cdnMode")
-        
+
         // 启动 VPN 服务
         val intent = Intent(context, ProxyVpnService::class.java).apply {
             action = ProxyVpnService.ACTION_START
             putExtra(ProxyVpnService.EXTRA_CONFIG, config.toUrl())
         }
-        
+
         try {
             context.startForegroundService(intent)
             _isRunning.value = true
@@ -191,7 +234,7 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
             _status.value = ProxyStatus.DISCONNECTED
         }
     }
-    
+
     /**
      * 停止代理
      */
@@ -199,20 +242,20 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
         if (!_isRunning.value) {
             return
         }
-        
+
         val context = getApplication<Application>()
         addLog("🛑 停止代理...")
-        
+
         val intent = Intent(context, ProxyVpnService::class.java).apply {
             action = ProxyVpnService.ACTION_STOP
         }
-        
+
         context.startService(intent)
         _isRunning.value = false
         _status.value = ProxyStatus.DISCONNECTED
         addLog("✅ 已停止")
     }
-    
+
     /**
      * 从 URL 导入配置
      */
@@ -222,33 +265,33 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
             addLog("❌ 无效链接")
             return false
         }
-        
+
         // 检查重名
         var finalConfig = config
         val existingNames = configs.value.map { it.name }
         if (config.name in existingNames) {
             finalConfig = config.copy(name = "${config.name} (导入)")
         }
-        
+
         saveConfig(finalConfig)
         addLog("✅ 导入: ${finalConfig.name}")
         return true
     }
-    
+
     /**
      * 导出配置 URL
      */
     fun getConfigUrl(config: ProxyConfig): String {
         return config.toUrl()
     }
-    
+
     /**
      * 导出所有配置为 JSON
      */
     suspend fun exportAllConfigsJson(): String {
         return repository.exportConfigsJson()
     }
-    
+
     /**
      * 从 JSON 导入配置
      */
@@ -261,7 +304,7 @@ class ProxyViewModel(application: Application) : AndroidViewModel(application) {
         }
         return result
     }
-    
+
     override fun onCleared() {
         super.onCleared()
         // 清理服务连接
